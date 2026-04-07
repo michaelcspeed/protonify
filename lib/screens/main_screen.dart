@@ -56,7 +56,6 @@ class _TopSearchBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = Theme.of(context).extension<ProtonifyColors>()!;
-    final mode = ref.watch(themeModeProvider);
     return GestureDetector(
       onPanStart: (_) => _windowApi.startDrag(),
       child: Container(
@@ -88,21 +87,6 @@ class _TopSearchBar extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: 8),
-          IconButton(
-            icon: Icon(
-              mode == ThemeMode.dark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
-              size: 18,
-              color: c.subtle,
-            ),
-            tooltip: mode == ThemeMode.dark ? 'Switch to Light Mode' : 'Switch to Dark Mode',
-            onPressed: () {
-              ref.read(themeModeProvider.notifier).state =
-                  mode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
-            },
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-          ),
-          const SizedBox(width: 2),
           _SettingsButton(c: c),
         ],
       ),
@@ -129,15 +113,15 @@ class _SettingsButton extends StatelessWidget {
   }
 }
 
-class _SettingsDialog extends StatefulWidget {
+class _SettingsDialog extends ConsumerStatefulWidget {
   final ProtonifyColors c;
   const _SettingsDialog({required this.c});
 
   @override
-  State<_SettingsDialog> createState() => _SettingsDialogState();
+  ConsumerState<_SettingsDialog> createState() => _SettingsDialogState();
 }
 
-class _SettingsDialogState extends State<_SettingsDialog> {
+class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
   bool _menuBarMode = false;
   bool _loading = true;
 
@@ -163,6 +147,36 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     } catch (_) {
       if (mounted) setState(() => _menuBarMode = !value);
     }
+  }
+
+  Widget _buildAppearanceRow(ProtonifyColors c) {
+    final mode = ref.watch(themeModeProvider);
+    final isDark = mode == ThemeMode.dark;
+    return Row(
+      children: [
+        Icon(isDark ? Icons.dark_mode_outlined : Icons.light_mode_outlined, size: 18, color: c.subtle),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Dark mode',
+                  style: TextStyle(fontSize: 13, color: c.onSurface)),
+              Text('Switch between light and dark theme',
+                  style: TextStyle(fontSize: 11, color: c.subtle)),
+            ],
+          ),
+        ),
+        Switch.adaptive(
+          value: isDark,
+          onChanged: (value) {
+            ref.read(themeModeProvider.notifier).state =
+                value ? ThemeMode.dark : ThemeMode.light;
+          },
+          activeTrackColor: c.accent,
+        ),
+      ],
+    );
   }
 
   @override
@@ -208,6 +222,10 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                     ),
                 ],
               ),
+              const SizedBox(height: 12),
+              Divider(height: 1, color: c.subtle.withValues(alpha: 0.15)),
+              const SizedBox(height: 12),
+              _buildAppearanceRow(c),
               const SizedBox(height: 16),
               Align(
                 alignment: Alignment.centerRight,

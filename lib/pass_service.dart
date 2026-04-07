@@ -5,18 +5,47 @@ import 'models.dart';
 enum SetupStatus { checking, cliNotFound, notLoggedIn, ready }
 
 class PassService {
-  static const _cli = '/Users/mike/.local/bin/pass-cli';
+  static String? _resolvedCli;
 
-  /// Check if the CLI binary exists on disk.
+  static final _searchPaths = [
+    '${Platform.environment['HOME']}/.local/bin/pass-cli',
+    '/opt/homebrew/bin/pass-cli',
+    '/usr/local/bin/pass-cli',
+  ];
+
+  static Future<String?> _findCli() async {
+    if (_resolvedCli != null) return _resolvedCli;
+    for (final path in _searchPaths) {
+      if (await File(path).exists()) {
+        _resolvedCli = path;
+        return path;
+      }
+    }
+    // Fall back to `which` for non-standard locations
+    try {
+      final result = await Process.run('which', ['pass-cli']);
+      if (result.exitCode == 0) {
+        final path = (result.stdout as String).trim();
+        if (path.isNotEmpty) {
+          _resolvedCli = path;
+          return path;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Check if the CLI binary can be found anywhere.
   Future<bool> isCliInstalled() async {
-    return File(_cli).exists();
+    return await _findCli() != null;
   }
 
   /// Try a lightweight command to see if the user is logged in.
-  /// Returns true if the CLI responds successfully (user is authenticated).
   Future<bool> isLoggedIn() async {
+    final cli = await _findCli();
+    if (cli == null) return false;
     try {
-      final result = await Process.run(_cli, ['vault', 'list', '--output', 'json']);
+      final result = await Process.run(cli, ['vault', 'list', '--output', 'json']);
       return result.exitCode == 0;
     } catch (_) {
       return false;
@@ -151,7 +180,11 @@ class PassService {
   }
 
   Future<String> _run(List<String> args) async {
-    final result = await Process.run(_cli, args);
+    final cli = await _findCli();
+    if (cli == null) {
+      throw Exception('pass-cli not found. Please install the Proton Pass CLI.');
+    }
+    final result = await Process.run(cli, args);
     if (result.exitCode != 0) {
       throw Exception('pass-cli error: ${result.stderr}');
     }

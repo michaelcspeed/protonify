@@ -63,7 +63,10 @@ class AppDelegate: FlutterAppDelegate {
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
     if let button = statusItem?.button {
-      if let image = NSImage(systemSymbolName: "lock.shield.fill", accessibilityDescription: "Protonify") {
+      if #available(macOS 11.0, *),
+         let base = NSImage(systemSymbolName: "lock.shield.fill", accessibilityDescription: "Protonify") {
+        let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+        let image = base.withSymbolConfiguration(config) ?? base
         image.isTemplate = true
         button.image = image
       } else {
@@ -93,7 +96,7 @@ class AppDelegate: FlutterAppDelegate {
   }
 
   private func toggleWindow() {
-    guard let window = mainFlutterWindow else { return }
+    guard let window = flutterWindow else { return }
 
     if window.isVisible && window.isKeyWindow {
       window.orderOut(nil)
@@ -103,7 +106,7 @@ class AppDelegate: FlutterAppDelegate {
   }
 
   private func showWindow() {
-    guard let window = mainFlutterWindow else { return }
+    guard let window = self.flutterWindow else { return }
     window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
   }
@@ -129,7 +132,7 @@ class AppDelegate: FlutterAppDelegate {
 
   // MARK: - Window reference
 
-  private var mainFlutterWindow: NSWindow? {
+  private var flutterWindow: NSWindow? {
     return NSApp.windows.first { $0 is MainFlutterWindow }
   }
 }
