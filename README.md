@@ -2,6 +2,16 @@
 
 A native macOS desktop client for [Proton Pass](https://proton.me/pass), built with Flutter.
 
+## How it works
+
+Protonify is a thin UI shell around Proton's own [`pass-cli`](https://proton.me/pass/download). The Flutter app shells out to the official CLI for every operation — listing vaults, reading items, generating TOTP codes, creating and editing entries. Protonify itself never talks to Proton's servers, never sees your master password, and never handles your end-to-end-encrypted vault data directly: all decryption happens inside `pass-cli`, exactly as it does when you run the CLI by hand.
+
+That means:
+
+- **No network code.** Protonify makes zero HTTP requests of its own. The only process that reaches the internet is `pass-cli`, signed and shipped by Proton.
+- **Your credentials stay with Proton's CLI.** Login, session, and key material live wherever `pass-cli` stores them — Protonify has no access to them.
+- **Auditable surface.** The trust boundary is the official CLI. If you trust `pass-cli`, the additional risk added by Protonify is just "a Flutter app that runs a subprocess and renders the JSON output."
+
 ## Features
 
 - Browse and search all your Proton Pass vaults and items
