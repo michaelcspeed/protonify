@@ -152,19 +152,36 @@ class IdentityContent {
   }
 }
 
+enum ExtraFieldType { text, hidden, totp }
+
 class ExtraField {
   final String name;
   final String value;
+  final ExtraFieldType type;
 
-  const ExtraField({required this.name, required this.value});
+  const ExtraField({required this.name, required this.value, required this.type});
 
   factory ExtraField.fromJson(Map<String, dynamic> j) {
     final content = j['content'] as Map<String, dynamic>? ?? {};
     String val = '';
-    if (content.containsKey('Text')) val = content['Text'] as String? ?? '';
-    if (content.containsKey('Hidden')) val = content['Hidden'] as String? ?? '';
-    if (content.containsKey('Totp')) val = content['Totp'] as String? ?? '';
-    return ExtraField(name: j['name'] as String? ?? '', value: val);
+    ExtraFieldType type = ExtraFieldType.text;
+    if (content.containsKey('Text')) {
+      val = content['Text'] as String? ?? '';
+      type = ExtraFieldType.text;
+    }
+    if (content.containsKey('Hidden')) {
+      val = content['Hidden'] as String? ?? '';
+      type = ExtraFieldType.hidden;
+    }
+    if (content.containsKey('Totp')) {
+      val = content['Totp'] as String? ?? '';
+      type = ExtraFieldType.totp;
+    }
+    return ExtraField(
+      name: j['name'] as String? ?? '',
+      value: val,
+      type: type,
+    );
   }
 }
 
@@ -205,6 +222,16 @@ class PassItem {
   String get displayUsername => login?.email.isNotEmpty == true
       ? login!.email
       : login?.username ?? '';
+
+  /// Primary TOTP URI/secret: the dedicated login field if set, otherwise the
+  /// first TOTP-typed extra field.
+  String get primaryTotpUri {
+    if (login != null && login!.totpUri.isNotEmpty) return login!.totpUri;
+    for (final f in extraFields) {
+      if (f.type == ExtraFieldType.totp && f.value.isNotEmpty) return f.value;
+    }
+    return '';
+  }
 
   factory PassItem.fromJson(Map<String, dynamic> j) {
     final content = j['content'] as Map<String, dynamic>? ?? {};

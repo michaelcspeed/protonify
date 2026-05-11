@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../app_state.dart';
 import '../main.dart';
 import '../models.dart';
+import '../pass_service.dart';
 
 String _categoryLabel(ItemType? category) {
   switch (category) {
@@ -188,6 +192,8 @@ class _ItemRowState extends ConsumerState<_ItemRow> {
                   ],
                 ),
               ),
+              if (widget.item.primaryTotpUri.isNotEmpty)
+                _OtpBadge(uri: widget.item.primaryTotpUri, c: c),
             ],
           ),
         ),
@@ -814,6 +820,119 @@ class _DialogButtonState extends State<_DialogButton> {
                   fontSize: 13,
                   fontWeight: widget.primary ? FontWeight.w600 : FontWeight.normal,
                   color: widget.primary ? Colors.white : widget.c.onSurface)),
+        ),
+      ),
+    );
+  }
+}
+
+// ── OTP badge ─────────────────────────────────────────────────────────────────
+
+int _totpPeriod(String uri) {
+  if (!uri.startsWith('otpauth://')) return 30;
+  try {
+    return int.tryParse(Uri.parse(uri).queryParameters['period'] ?? '') ?? 30;
+  } catch (_) {
+    return 30;
+  }
+}
+
+class _OtpBadge extends StatefulWidget {
+  final String uri;
+  final ProtonifyColors c;
+  const _OtpBadge({required this.uri, required this.c});
+
+  @override
+  State<_OtpBadge> createState() => _OtpBadgeState();
+}
+
+class _OtpBadgeState extends State<_OtpBadge> {
+  final PassService _svc = PassService();
+  String? _code;
+  bool _copied = false;
+  Timer? _ticker;
+  late int _period;
+  int _remaining = 30;
+
+  @override
+  void initState() {
+    super.initState();
+    _period = _totpPeriod(widget.uri);
+    _refresh();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  void _tick() {
+    if (!mounted) return;
+    final secs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final remaining = _period - (secs % _period);
+    if (remaining == _period) {
+      _refresh();
+    } else {
+      setState(() => _remaining = remaining);
+    }
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final code = await _svc.generateTotp(widget.uri);
+      if (!mounted) return;
+      final secs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      setState(() {
+        _code = code;
+        _remaining = _period - (secs % _period);
+      });
+    } catch (_) {
+      if (mounted) setState(() => _code = null);
+    }
+  }
+
+  Future<void> _copy() async {
+    if (_code == null) return;
+    await Clipboard.setData(ClipboardData(text: _code!));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    await Future.delayed(const Duration(seconds: 2));
+    if (mounted) setState(() => _copied = false);
+  }
+
+  String _formatted(String code) {
+    if (code.length == 6) return '${code.substring(0, 3)} ${code.substring(3)}';
+    if (code.length == 8) return '${code.substring(0, 4)} ${code.substring(4)}';
+    return code;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    if (_code == null) {
+      return const SizedBox(width: 0);
+    }
+    final progress = _remaining / _period;
+    final ringColor = _remaining <= 5 ? const Color(0xFFFF375F) : c.accent;
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _copy,
+      child: Padding(
+        padding: const EdgeInsets.only(left: 8),
+        child: SizedBox(
+          width: 16,
+          height: 16,
+          child: _copied
+              ? Icon(Icons.check, size: 14, color: const Color(0xFF34C759))
+              : CircularProgressIndicator(
+                  value: progress,
+                  strokeWidth: 2,
+                  backgroundColor: c.surfaceVariant,
+                  valueColor: AlwaysStoppedAnimation(ringColor),
+                ),
         ),
       ),
     );

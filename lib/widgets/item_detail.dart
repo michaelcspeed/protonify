@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../app_state.dart';
 import '../main.dart';
 import '../models.dart';
+import '../pass_service.dart';
 import 'item_list.dart';
 
 class ItemDetailPane extends ConsumerWidget {
@@ -65,11 +68,9 @@ class _ItemDetail extends StatelessWidget {
         if (item.extraFields.isNotEmpty) ...[
           _SectionLabel('Custom Fields', c),
           const SizedBox(height: 6),
-          ...item.extraFields.map((f) => _FieldRow(
-                label: f.name,
-                value: f.value,
-                c: c,
-              )),
+          ...item.extraFields.map((f) => f.type == ExtraFieldType.totp
+              ? _OtpFieldRow(label: f.name, uri: f.value, c: c)
+              : _FieldRow(label: f.name, value: f.value, c: c)),
         ],
         const SizedBox(height: 24),
         _MetaRow('Created', _formatDate(item.createTime), c),
@@ -217,7 +218,7 @@ class _LoginFields extends StatelessWidget {
         if (login.urls.isNotEmpty)
           _FieldRow(label: 'Website', value: login.urls.first, c: c),
         if (login.totpUri.isNotEmpty)
-          _FieldRow(label: 'TOTP URI', value: login.totpUri, c: c, obscure: false),
+          _OtpFieldRow(label: '2FA token', uri: login.totpUri, c: c),
       ],
     );
   }
@@ -519,6 +520,157 @@ class _MetaRow extends StatelessWidget {
           Text(value,
               style: TextStyle(fontSize: 11, color: c.subtle)),
         ],
+      ),
+    );
+  }
+}
+
+int _totpPeriodFromUri(String uri) {
+  if (!uri.startsWith('otpauth://')) return 30;
+  try {
+    return int.tryParse(Uri.parse(uri).queryParameters['period'] ?? '') ?? 30;
+  } catch (_) {
+    return 30;
+  }
+}
+
+class _OtpFieldRow extends StatefulWidget {
+  final String label;
+  final String uri;
+  final ProtonifyColors c;
+  const _OtpFieldRow({required this.label, required this.uri, required this.c});
+
+  @override
+  State<_OtpFieldRow> createState() => _OtpFieldRowState();
+}
+
+class _OtpFieldRowState extends State<_OtpFieldRow> {
+  final PassService _svc = PassService();
+  String? _code;
+  bool _copied = false;
+  Timer? _ticker;
+  late int _period;
+  int _remaining = 30;
+
+  @override
+  void initState() {
+    super.initState();
+    _period = _totpPeriodFromUri(widget.uri);
+    _refresh();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  void _tick() {
+    if (!mounted) return;
+    final secs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final remaining = _period - (secs % _period);
+    if (remaining == _period) {
+      _refresh();
+    } else {
+      setState(() => _remaining = remaining);
+    }
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final code = await _svc.generateTotp(widget.uri);
+      if (!mounted) return;
+      final secs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      setState(() {
+        _code = code;
+        _remaining = _period - (secs % _period);
+      });
+    } catch (_) {
+      if (mounted) setState(() => _code = null);
+    }
+  }
+
+  Future<void> _copy() async {
+    if (_code == null) return;
+    await Clipboard.setData(ClipboardData(text: _code!));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    await Future.delayed(const Duration(seconds: 2));
+    if (mounted) setState(() => _copied = false);
+  }
+
+  String _formatted(String code) {
+    if (code.length == 6) return '${code.substring(0, 3)} ${code.substring(3)}';
+    if (code.length == 8) return '${code.substring(0, 4)} ${code.substring(4)}';
+    return code;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    final progress = _remaining / _period;
+    final ringColor = _remaining <= 5 ? const Color(0xFFFF375F) : c.accent;
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _copy,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: c.surface,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(widget.label,
+                      style: TextStyle(fontSize: 10, color: c.subtle)),
+                  const SizedBox(height: 2),
+                  Text(
+                    _code == null ? '••• •••' : _formatted(_code!),
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontFamily: 'monospace',
+                      fontWeight: FontWeight.w600,
+                      color: c.onSurface,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  CircularProgressIndicator(
+                    value: progress,
+                    strokeWidth: 2,
+                    backgroundColor: c.surfaceVariant,
+                    valueColor: AlwaysStoppedAnimation(ringColor),
+                  ),
+                  Text(
+                    '$_remaining',
+                    style: TextStyle(fontSize: 9, color: c.subtle),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            Icon(
+              _copied ? Icons.check : Icons.copy_outlined,
+              size: 15,
+              color: _copied ? const Color(0xFF34C759) : c.subtle,
+            ),
+          ],
+        ),
       ),
     );
   }

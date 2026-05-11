@@ -179,6 +179,12 @@ class PassService {
     ]);
   }
 
+  Future<String> generateTotp(String secretOrUri) async {
+    final out = await _run(['totp', 'generate', '--output', 'json', secretOrUri]);
+    final data = jsonDecode(out) as Map<String, dynamic>;
+    return data['token'] as String? ?? '';
+  }
+
   Future<String> _run(List<String> args) async {
     final cli = await _findCli();
     if (cli == null) {

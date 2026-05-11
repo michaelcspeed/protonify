@@ -1,11 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../app_state.dart';
 import '../generated/window_api.g.dart';
 import '../main.dart';
 import '../widgets/vault_sidebar.dart';
 import '../widgets/item_list.dart';
 import '../widgets/item_detail.dart';
+
+const double _kSidebarMin = 140;
+const double _kSidebarMax = 360;
+const double _kSidebarDefault = 220;
+const double _kListMin = 200;
+const double _kListMax = 480;
+const double _kListDefault = 280;
+const String _kSidebarPrefKey = 'pane.sidebarWidth';
+const String _kListPrefKey = 'pane.listWidth';
 
 final _windowApi = WindowApi();
 
@@ -17,14 +27,44 @@ class MainScreen extends ConsumerStatefulWidget {
 }
 
 class _MainScreenState extends ConsumerState<MainScreen> {
+  double _sidebarWidth = _kSidebarDefault;
+  double _listWidth = _kListDefault;
+  SharedPreferences? _prefs;
+
   @override
   void initState() {
     super.initState();
-    ref.read(appStateProvider.notifier).loadVaults();
+    Future.microtask(() => ref.read(appStateProvider.notifier).loadVaults());
+    _loadWidths();
+  }
+
+  Future<void> _loadWidths() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _prefs = prefs;
+      _sidebarWidth = (prefs.getDouble(_kSidebarPrefKey) ?? _kSidebarDefault)
+          .clamp(_kSidebarMin, _kSidebarMax);
+      _listWidth = (prefs.getDouble(_kListPrefKey) ?? _kListDefault)
+          .clamp(_kListMin, _kListMax);
+    });
+  }
+
+  void _setSidebar(double w) {
+    final clamped = w.clamp(_kSidebarMin, _kSidebarMax);
+    setState(() => _sidebarWidth = clamped);
+    _prefs?.setDouble(_kSidebarPrefKey, clamped);
+  }
+
+  void _setList(double w) {
+    final clamped = w.clamp(_kListMin, _kListMax);
+    setState(() => _listWidth = clamped);
+    _prefs?.setDouble(_kListPrefKey, clamped);
   }
 
   @override
   Widget build(BuildContext context) {
+    final c = Theme.of(context).extension<ProtonifyColors>()!;
     return Scaffold(
       body: Column(
         children: [
@@ -32,19 +72,63 @@ class _MainScreenState extends ConsumerState<MainScreen> {
           Expanded(
             child: Row(
               children: [
-                ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: 220, minWidth: 0),
-                  child: VaultSidebar(),
+                SizedBox(width: _sidebarWidth, child: const VaultSidebar()),
+                _PaneDivider(
+                  c: c,
+                  onDrag: (dx) => _setSidebar(_sidebarWidth + dx),
                 ),
-                ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: 280, minWidth: 0),
-                  child: ItemListPane(),
+                SizedBox(width: _listWidth, child: const ItemListPane()),
+                _PaneDivider(
+                  c: c,
+                  onDrag: (dx) => _setList(_listWidth + dx),
                 ),
-                Expanded(child: ItemDetailPane()),
+                const Expanded(child: ItemDetailPane()),
               ],
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _PaneDivider extends StatefulWidget {
+  final ProtonifyColors c;
+  final void Function(double dx) onDrag;
+  const _PaneDivider({required this.c, required this.onDrag});
+
+  @override
+  State<_PaneDivider> createState() => _PaneDividerState();
+}
+
+class _PaneDividerState extends State<_PaneDivider> {
+  bool _hovered = false;
+  bool _dragging = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final active = _hovered || _dragging;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onHorizontalDragStart: (_) => setState(() => _dragging = true),
+        onHorizontalDragEnd: (_) => setState(() => _dragging = false),
+        onHorizontalDragCancel: () => setState(() => _dragging = false),
+        onHorizontalDragUpdate: (d) => widget.onDrag(d.delta.dx),
+        child: SizedBox(
+          width: 6,
+          child: Center(
+            child: Container(
+              width: 1,
+              color: active
+                  ? widget.c.accent.withValues(alpha: 0.5)
+                  : widget.c.subtle.withValues(alpha: 0.15),
+            ),
+          ),
+        ),
       ),
     );
   }

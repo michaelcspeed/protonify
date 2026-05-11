@@ -16,7 +16,13 @@ A native macOS desktop client for [Proton Pass](https://proton.me/pass), built w
 
 ### From Releases
 
-Download the latest `.dmg` from the [Releases](../../releases) page, open it, and drag **Protonify.app** into your Applications folder.
+Download the latest `Protonify-macOS.zip` from the [Releases](../../releases) page, unzip it, and drag **protonify.app** into your Applications folder.
+
+> **Note:** The app is not signed with an Apple Developer certificate. After unzipping, macOS may say the app is "damaged". To fix this, run the following in Terminal:
+> ```bash
+> xattr -cr /Applications/protonify.app
+> ```
+> Then right-click the app, choose **Open**, and click **Open** in the dialog. You only need to do this once.
 
 ### Build from source
 
