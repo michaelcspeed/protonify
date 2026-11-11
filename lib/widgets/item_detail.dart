@@ -60,6 +60,8 @@ class _ItemDetail extends StatelessWidget {
           _CreditCardFields(card: item.creditCard!, c: c),
         if (item.type == ItemType.identity && item.identity != null)
           _IdentityFields(identity: item.identity!, c: c),
+        if (item.type == ItemType.wifi && item.wifi != null)
+          _WifiFields(wifi: item.wifi!, c: c),
         if (item.note.isNotEmpty) ...[
           _SectionLabel('Notes', c),
           const SizedBox(height: 6),
@@ -138,6 +140,14 @@ class _Header extends ConsumerWidget {
         ),
         const SizedBox(width: 4),
         IconButton(
+          icon: Icon(Icons.folder_outlined, size: 17, color: c.subtle),
+          tooltip: 'Move to folder',
+          onPressed: () => _showFolderPicker(context, ref),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+        ),
+        const SizedBox(width: 4),
+        IconButton(
           icon: Icon(Icons.delete_outline, size: 18, color: c.subtle),
           tooltip: 'Move to Trash',
           onPressed: () => _confirmTrash(context, ref),
@@ -146,6 +156,76 @@ class _Header extends ConsumerWidget {
         ),
       ],
     );
+  }
+
+  Future<void> _showFolderPicker(BuildContext context, WidgetRef ref) async {
+    final c = Theme.of(context).extension<ProtonifyColors>()!;
+    final state = ref.read(appStateProvider);
+    // Only folders in the same vault as this item are valid destinations.
+    final folders =
+        state.folders.where((f) => f.shareId == item.shareId).toList();
+
+    final choice = await showDialog<_FolderChoice>(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        child: Container(
+          width: 320,
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(6, 2, 6, 10),
+                child: Text('Move to folder',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: c.onSurface)),
+              ),
+              _FolderChoiceTile(
+                label: '(No folder)',
+                icon: Icons.inbox_outlined,
+                selected: item.folderId == null,
+                c: c,
+                onTap: () => Navigator.of(ctx).pop(const _FolderChoice.none()),
+              ),
+              if (folders.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Text('No folders in this vault.',
+                      style: TextStyle(fontSize: 12, color: c.subtle)),
+                )
+              else
+                for (final f in folders)
+                  _FolderChoiceTile(
+                    label: f.name,
+                    icon: Icons.folder_outlined,
+                    selected: item.folderId == f.id,
+                    c: c,
+                    onTap: () => Navigator.of(ctx).pop(_FolderChoice(f.id)),
+                  ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: Text('Cancel', style: TextStyle(color: c.onSurface)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (choice == null) return;
+    if (choice.folderId == item.folderId) return;
+    try {
+      await ref
+          .read(appStateProvider.notifier)
+          .moveItemToFolder(item: item, folderId: choice.folderId);
+    } catch (_) {
+      // silent — UI will reflect no change
+    }
   }
 
   Future<void> _confirmTrash(BuildContext context, WidgetRef ref) async {
@@ -185,6 +265,7 @@ class _Header extends ConsumerWidget {
         ItemType.creditCard => const Color(0xFF34C759),
         ItemType.identity => const Color(0xFFFF375F),
         ItemType.alias => const Color(0xFF5AC8FA),
+        ItemType.wifi => const Color(0xFF32ADE6),
         _ => const Color(0xFF6D4AFF),
       };
 
@@ -194,8 +275,41 @@ class _Header extends ConsumerWidget {
         ItemType.creditCard => Icons.credit_card,
         ItemType.identity => Icons.person_outline,
         ItemType.alias => Icons.alternate_email,
+        ItemType.wifi => Icons.wifi,
         _ => Icons.key_outlined,
       };
+}
+
+class _WifiFields extends StatelessWidget {
+  final WifiContent wifi;
+  final ProtonifyColors c;
+  const _WifiFields({required this.wifi, required this.c});
+
+  String _securityLabel(String s) => switch (s) {
+        'wpa3' => 'WPA3',
+        'wpa2' => 'WPA2',
+        'wpa' => 'WPA',
+        'wep' => 'WEP',
+        'open' => 'Open',
+        'none' => 'None',
+        _ => s.toUpperCase(),
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SectionLabel('Network', c),
+        const SizedBox(height: 6),
+        _FieldRow(label: 'SSID', value: wifi.ssid, c: c),
+        if (wifi.password.isNotEmpty) _PasswordRow(password: wifi.password, c: c),
+        if (wifi.security.isNotEmpty)
+          _FieldRow(label: 'Security', value: _securityLabel(wifi.security), c: c),
+        const SizedBox(height: 16),
+      ],
+    );
+  }
 }
 
 class _LoginFields extends StatelessWidget {
@@ -670,6 +784,72 @@ class _OtpFieldRowState extends State<_OtpFieldRow> {
               color: _copied ? const Color(0xFF34C759) : c.subtle,
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FolderChoice {
+  final String? folderId;
+  const _FolderChoice(this.folderId);
+  const _FolderChoice.none() : folderId = null;
+}
+
+class _FolderChoiceTile extends StatefulWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final ProtonifyColors c;
+  final VoidCallback onTap;
+  const _FolderChoiceTile({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.c,
+    required this.onTap,
+  });
+
+  @override
+  State<_FolderChoiceTile> createState() => _FolderChoiceTileState();
+}
+
+class _FolderChoiceTileState extends State<_FolderChoiceTile> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 1),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          decoration: BoxDecoration(
+            color: widget.selected
+                ? c.accent.withValues(alpha: 0.18)
+                : _hovered
+                    ? c.surfaceVariant
+                    : Colors.transparent,
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Row(children: [
+            Icon(widget.icon, size: 15,
+                color: widget.selected ? c.accent : c.subtle),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(widget.label,
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: widget.selected ? FontWeight.w600 : FontWeight.normal,
+                      color: widget.selected ? c.accent : c.onSurface)),
+            ),
+            if (widget.selected)
+              Icon(Icons.check, size: 14, color: c.accent),
+          ]),
         ),
       ),
     );

@@ -4,9 +4,11 @@ import 'pass_service.dart';
 
 class AppState {
   final List<Vault> vaults;
+  final List<Folder> folders;
   final List<PassItem> items;
   final PassItem? selectedItem;
   final ItemType? selectedCategory; // null = All
+  final String? selectedFolderId;   // null = no folder filter
   final String searchQuery;
   final bool loadingVaults;
   final bool loadingItems;
@@ -14,9 +16,11 @@ class AppState {
 
   const AppState({
     this.vaults = const [],
+    this.folders = const [],
     this.items = const [],
     this.selectedItem,
     this.selectedCategory,
+    this.selectedFolderId,
     this.searchQuery = '',
     this.loadingVaults = false,
     this.loadingItems = false,
@@ -28,6 +32,9 @@ class AppState {
     if (selectedCategory != null) {
       result = result.where((i) => i.type == selectedCategory).toList();
     }
+    if (selectedFolderId != null) {
+      result = result.where((i) => i.folderId == selectedFolderId).toList();
+    }
     if (searchQuery.isEmpty) return result;
     final q = searchQuery.toLowerCase();
     return result.where((i) {
@@ -37,11 +44,27 @@ class AppState {
     }).toList();
   }
 
+  /// The vault the currently-selected folder belongs to, if any.
+  Vault? get selectedFolderVault {
+    if (selectedFolderId == null) return null;
+    Folder? f;
+    for (final x in folders) {
+      if (x.id == selectedFolderId) { f = x; break; }
+    }
+    if (f == null) return null;
+    for (final v in vaults) {
+      if (v.shareId == f.shareId) return v;
+    }
+    return null;
+  }
+
   AppState copyWith({
     List<Vault>? vaults,
+    List<Folder>? folders,
     List<PassItem>? items,
     Object? selectedItem = _sentinel,
     Object? selectedCategory = _sentinel,
+    Object? selectedFolderId = _sentinel,
     String? searchQuery,
     bool? loadingVaults,
     bool? loadingItems,
@@ -49,6 +72,7 @@ class AppState {
   }) {
     return AppState(
       vaults: vaults ?? this.vaults,
+      folders: folders ?? this.folders,
       items: items ?? this.items,
       selectedItem: selectedItem == _sentinel
           ? this.selectedItem
@@ -56,6 +80,9 @@ class AppState {
       selectedCategory: selectedCategory == _sentinel
           ? this.selectedCategory
           : selectedCategory as ItemType?,
+      selectedFolderId: selectedFolderId == _sentinel
+          ? this.selectedFolderId
+          : selectedFolderId as String?,
       searchQuery: searchQuery ?? this.searchQuery,
       loadingVaults: loadingVaults ?? this.loadingVaults,
       loadingItems: loadingItems ?? this.loadingItems,
@@ -76,13 +103,28 @@ class AppStateNotifier extends StateNotifier<AppState> {
     try {
       final vaults = await _svc.listVaults();
       state = state.copyWith(vaults: vaults, loadingVaults: false, loadingItems: true);
-      // Load all vaults in parallel
-      final results = await Future.wait(
+      // Load items and folders for every vault in parallel.
+      final itemResults = await Future.wait(
         vaults.map((v) => _svc.listItems(v.name)),
       );
-      final allItems = results.expand((list) => list).toList()
+      final folderResults = await Future.wait(
+        vaults.map((v) async {
+          try {
+            return await _svc.listFolders(v.name);
+          } catch (_) {
+            return <Folder>[];
+          }
+        }),
+      );
+      final allItems = itemResults.expand((list) => list).toList()
         ..sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
-      state = state.copyWith(items: allItems, loadingItems: false);
+      final allFolders = folderResults.expand((list) => list).toList()
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      state = state.copyWith(
+        items: allItems,
+        folders: allFolders,
+        loadingItems: false,
+      );
     } catch (e) {
       state = state.copyWith(loadingVaults: false, loadingItems: false, error: e.toString());
     }
@@ -90,7 +132,20 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   void selectCategory(ItemType? category) {
     if (state.loadingItems) return;
-    state = state.copyWith(selectedCategory: category, selectedItem: null);
+    state = state.copyWith(
+      selectedCategory: category,
+      selectedFolderId: null,
+      selectedItem: null,
+    );
+  }
+
+  void selectFolder(String? folderId) {
+    if (state.loadingItems) return;
+    state = state.copyWith(
+      selectedFolderId: folderId,
+      selectedCategory: null,
+      selectedItem: null,
+    );
   }
 
   void selectItem(PassItem? item) {
@@ -138,6 +193,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     String? username,
     String? password,
     String? url,
+    String? folderId,
   }) async {
     await _svc.createLogin(
       vaultName: vaultName,
@@ -146,6 +202,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       username: username,
       password: password,
       url: url,
+      folderId: folderId,
     );
   }
 
@@ -153,8 +210,34 @@ class AppStateNotifier extends StateNotifier<AppState> {
     required String vaultName,
     required String title,
     String? note,
+    String? folderId,
   }) async {
-    await _svc.createNote(vaultName: vaultName, title: title, note: note);
+    await _svc.createNote(
+      vaultName: vaultName,
+      title: title,
+      note: note,
+      folderId: folderId,
+    );
+  }
+
+  Future<void> createWifi({
+    required String vaultName,
+    required String title,
+    String? ssid,
+    String? password,
+    String? security,
+    String? note,
+    String? folderId,
+  }) async {
+    await _svc.createWifi(
+      vaultName: vaultName,
+      title: title,
+      ssid: ssid,
+      password: password,
+      security: security,
+      note: note,
+      folderId: folderId,
+    );
   }
 
   Future<void> createCreditCard({
@@ -166,6 +249,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     String? expirationDate,
     String? pin,
     String? note,
+    String? folderId,
   }) async {
     await _svc.createCreditCard(
       vaultName: vaultName,
@@ -176,7 +260,50 @@ class AppStateNotifier extends StateNotifier<AppState> {
       expirationDate: expirationDate,
       pin: pin,
       note: note,
+      folderId: folderId,
     );
+  }
+
+  // ── Folder operations ───────────────────────────────────────────────────
+
+  Future<void> createFolder({
+    required String vaultName,
+    required String name,
+  }) async {
+    await _svc.createFolder(vaultName: vaultName, name: name);
+    await loadVaults();
+  }
+
+  Future<void> renameFolder({
+    required Folder folder,
+    required String newName,
+  }) async {
+    await _svc.renameFolder(
+      shareId: folder.shareId,
+      folderId: folder.id,
+      name: newName,
+    );
+    await loadVaults();
+  }
+
+  Future<void> deleteFolder(Folder folder) async {
+    await _svc.deleteFolder(shareId: folder.shareId, folderId: folder.id);
+    if (state.selectedFolderId == folder.id) {
+      state = state.copyWith(selectedFolderId: null);
+    }
+    await loadVaults();
+  }
+
+  Future<void> moveItemToFolder({
+    required PassItem item,
+    required String? folderId,
+  }) async {
+    await _svc.moveItemToFolder(
+      shareId: item.shareId,
+      itemId: item.id,
+      folderId: folderId,
+    );
+    await loadVaults();
   }
 }
 

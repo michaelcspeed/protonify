@@ -29,6 +29,7 @@ class SetupScreen extends ConsumerWidget {
                   SetupStatus.checking => _CheckingView(key: const ValueKey('checking')),
                   SetupStatus.cliNotFound => _CliNotFoundView(key: const ValueKey('notfound')),
                   SetupStatus.notLoggedIn => _NotLoggedInView(key: const ValueKey('notlogged')),
+                  SetupStatus.locked => const SizedBox.shrink(),
                   SetupStatus.ready => const SizedBox.shrink(),
                 },
               ),

@@ -4,6 +4,7 @@ import 'pass_service.dart';
 import 'setup_state.dart';
 import 'screens/main_screen.dart';
 import 'screens/setup_screen.dart';
+import 'screens/unlock_screen.dart';
 
 final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.dark);
 
@@ -89,6 +90,9 @@ class _AppShell extends ConsumerWidget {
     final status = ref.watch(setupProvider);
     if (status == SetupStatus.ready) {
       return const MainScreen();
+    }
+    if (status == SetupStatus.locked) {
+      return const UnlockScreen();
     }
     return const SetupScreen();
   }

@@ -16,6 +16,37 @@ class Vault {
       );
 }
 
+class Folder {
+  final String id;
+  final String shareId;
+  final String name;
+  final String? parentFolderId;
+
+  const Folder({
+    required this.id,
+    required this.shareId,
+    required this.name,
+    this.parentFolderId,
+  });
+
+  /// From a `folder list` response.
+  factory Folder.fromFolderListJson(Map<String, dynamic> j) => Folder(
+        id: j['id'] as String,
+        shareId: j['share_id'] as String,
+        name: (j['content'] as Map<String, dynamic>?)?['name'] as String? ?? '',
+        parentFolderId: j['parent_folder_id'] as String?,
+      );
+
+  /// From the `folders` array inside an `item list` response
+  /// (different key names).
+  factory Folder.fromItemListJson(Map<String, dynamic> j, String shareId) => Folder(
+        id: j['folder_id'] as String,
+        shareId: shareId,
+        name: j['folder_name'] as String? ?? '',
+        parentFolderId: j['parent_id'] as String?,
+      );
+}
+
 enum ItemType { login, note, creditCard, identity, alias, sshKey, wifi, custom, unknown }
 
 class LoginContent {
@@ -39,6 +70,24 @@ class LoginContent {
         password: j['password'] as String? ?? '',
         urls: (j['urls'] as List<dynamic>? ?? []).cast<String>(),
         totpUri: j['totp_uri'] as String? ?? '',
+      );
+}
+
+class WifiContent {
+  final String ssid;
+  final String password;
+  final String security; // lowercase canonical: wpa, wpa2, wpa3, wep, open, none
+
+  const WifiContent({
+    required this.ssid,
+    required this.password,
+    required this.security,
+  });
+
+  factory WifiContent.fromJson(Map<String, dynamic> j) => WifiContent(
+        ssid: j['ssid'] as String? ?? '',
+        password: j['password'] as String? ?? '',
+        security: (j['security'] as String? ?? '').toLowerCase(),
       );
 }
 
@@ -152,6 +201,42 @@ class IdentityContent {
   }
 }
 
+enum PasswordStrength { vulnerable, weak, strong, unknown }
+
+class PasswordScore {
+  final double numericScore;
+  final PasswordStrength strength;
+  final List<String> penalties;
+
+  const PasswordScore({
+    required this.numericScore,
+    required this.strength,
+    required this.penalties,
+  });
+
+  factory PasswordScore.fromJson(Map<String, dynamic> j) {
+    final raw = (j['password_score'] as String? ?? '').toLowerCase();
+    final strength = switch (raw) {
+      'vulnerable' => PasswordStrength.vulnerable,
+      'weak' => PasswordStrength.weak,
+      'strong' => PasswordStrength.strong,
+      _ => PasswordStrength.unknown,
+    };
+    return PasswordScore(
+      numericScore: (j['numeric_score'] as num?)?.toDouble() ?? 0.0,
+      strength: strength,
+      penalties: (j['penalties'] as List<dynamic>? ?? []).cast<String>(),
+    );
+  }
+
+  String get label => switch (strength) {
+        PasswordStrength.vulnerable => 'Vulnerable',
+        PasswordStrength.weak => 'Weak',
+        PasswordStrength.strong => 'Strong',
+        PasswordStrength.unknown => '',
+      };
+}
+
 enum ExtraFieldType { text, hidden, totp }
 
 class ExtraField {
@@ -189,12 +274,14 @@ class PassItem {
   final String id;
   final String shareId;
   final String vaultId;
+  final String? folderId;
   final String title;
   final String note;
   final ItemType type;
   final LoginContent? login;
   final CreditCardContent? creditCard;
   final IdentityContent? identity;
+  final WifiContent? wifi;
   final List<ExtraField> extraFields;
   final DateTime createTime;
   final DateTime modifyTime;
@@ -203,12 +290,14 @@ class PassItem {
     required this.id,
     required this.shareId,
     required this.vaultId,
+    this.folderId,
     required this.title,
     required this.note,
     required this.type,
     this.login,
     this.creditCard,
     this.identity,
+    this.wifi,
     required this.extraFields,
     required this.createTime,
     required this.modifyTime,
@@ -247,6 +336,7 @@ class PassItem {
     LoginContent? login;
     CreditCardContent? creditCard;
     IdentityContent? identity;
+    WifiContent? wifi;
 
     if (inner.containsKey('Login')) {
       type = ItemType.login;
@@ -259,6 +349,9 @@ class PassItem {
     } else if (inner.containsKey('Identity')) {
       type = ItemType.identity;
       identity = IdentityContent.fromJson(inner['Identity'] as Map<String, dynamic>);
+    } else if (inner.containsKey('Wifi')) {
+      type = ItemType.wifi;
+      wifi = WifiContent.fromJson(inner['Wifi'] as Map<String, dynamic>);
     } else if (inner.containsKey('Alias')) {
       type = ItemType.alias;
     }
@@ -267,12 +360,14 @@ class PassItem {
       id: j['id'] as String? ?? '',
       shareId: j['share_id'] as String? ?? '',
       vaultId: j['vault_id'] as String? ?? '',
+      folderId: j['folder_id'] as String?,
       title: title,
       note: note,
       type: type,
       login: login,
       creditCard: creditCard,
       identity: identity,
+      wifi: wifi,
       extraFields: extra,
       createTime: DateTime.tryParse(j['create_time'] as String? ?? '') ?? DateTime.now(),
       modifyTime: DateTime.tryParse(j['modify_time'] as String? ?? '') ?? DateTime.now(),

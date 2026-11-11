@@ -4,6 +4,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../app_state.dart';
 import '../generated/window_api.g.dart';
 import '../main.dart';
+import '../pass_service.dart';
+import '../setup_state.dart';
 import '../widgets/vault_sidebar.dart';
 import '../widgets/item_list.dart';
 import '../widgets/item_detail.dart';
@@ -134,12 +136,36 @@ class _PaneDividerState extends State<_PaneDivider> {
   }
 }
 
-class _TopSearchBar extends ConsumerWidget {
+class _TopSearchBar extends ConsumerStatefulWidget {
   const _TopSearchBar();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_TopSearchBar> createState() => _TopSearchBarState();
+}
+
+class _TopSearchBarState extends ConsumerState<_TopSearchBar> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final c = Theme.of(context).extension<ProtonifyColors>()!;
+    ref.listen<String>(
+      appStateProvider.select((s) => s.searchQuery),
+      (_, next) {
+        if (_controller.text != next) {
+          _controller.value = TextEditingValue(
+            text: next,
+            selection: TextSelection.collapsed(offset: next.length),
+          );
+        }
+      },
+    );
     return GestureDetector(
       onPanStart: (_) => _windowApi.startDrag(),
       child: Container(
@@ -149,6 +175,7 @@ class _TopSearchBar extends ConsumerWidget {
         children: [
           Expanded(
             child: TextField(
+              controller: _controller,
               onChanged: ref.read(appStateProvider.notifier).setSearch,
               style: TextStyle(fontSize: 13, color: c.onSurface),
               decoration: InputDecoration(
@@ -208,11 +235,15 @@ class _SettingsDialog extends ConsumerStatefulWidget {
 class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
   bool _menuBarMode = false;
   bool _loading = true;
+  bool? _sessionHasLock;
+  bool _locking = false;
+  final _svc = PassService();
 
   @override
   void initState() {
     super.initState();
     _loadSetting();
+    _loadLockStatus();
   }
 
   Future<void> _loadSetting() async {
@@ -224,6 +255,29 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
     }
   }
 
+  Future<void> _loadLockStatus() async {
+    final info = await _svc.getSessionInfo();
+    if (mounted) setState(() => _sessionHasLock = info?.hasLock);
+  }
+
+  Future<void> _lockNow() async {
+    setState(() => _locking = true);
+    try {
+      await _svc.lockSession();
+      if (mounted) {
+        Navigator.of(context).pop();
+        ref.read(setupProvider.notifier).check();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _locking = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+      }
+    }
+  }
+
   Future<void> _toggle(bool value) async {
     setState(() => _menuBarMode = value);
     try {
@@ -231,6 +285,45 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
     } catch (_) {
       if (mounted) setState(() => _menuBarMode = !value);
     }
+  }
+
+  Widget _buildLockRow(ProtonifyColors c) {
+    final has = _sessionHasLock;
+    return Row(
+      children: [
+        Icon(Icons.lock_outline, size: 18, color: c.subtle),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Session lock',
+                  style: TextStyle(fontSize: 13, color: c.onSurface)),
+              Text(
+                has == null
+                    ? 'Checking…'
+                    : has
+                        ? 'Lock code is set — tap Lock now to require it.'
+                        : 'No lock set. Run `pass-cli session create-lock` to set one.',
+                style: TextStyle(fontSize: 11, color: c.subtle),
+              ),
+            ],
+          ),
+        ),
+        if (has == true)
+          FilledButton(
+            onPressed: _locking ? null : _lockNow,
+            style: FilledButton.styleFrom(
+              backgroundColor: c.accent,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: Text(_locking ? 'Locking…' : 'Lock now',
+                style: const TextStyle(fontSize: 12)),
+          ),
+      ],
+    );
   }
 
   Widget _buildAppearanceRow(ProtonifyColors c) {
@@ -310,6 +403,10 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
               Divider(height: 1, color: c.subtle.withValues(alpha: 0.15)),
               const SizedBox(height: 12),
               _buildAppearanceRow(c),
+              const SizedBox(height: 12),
+              Divider(height: 1, color: c.subtle.withValues(alpha: 0.15)),
+              const SizedBox(height: 12),
+              _buildLockRow(c),
               const SizedBox(height: 16),
               Align(
                 alignment: Alignment.centerRight,
