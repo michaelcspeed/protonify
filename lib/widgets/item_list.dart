@@ -4,261 +4,504 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../app_state.dart';
-import '../main.dart';
 import '../models.dart';
 import '../pass_service.dart';
+import '../theme.dart';
+import '../ui_state.dart';
+import 'ui.dart';
 
-String _categoryLabel(ItemType? category) {
-  switch (category) {
-    case ItemType.login:      return 'LOGINS';
-    case ItemType.alias:      return 'ALIASES';
-    case ItemType.creditCard: return 'CARDS';
-    case ItemType.identity:   return 'IDENTITIES';
-    case ItemType.note:       return 'NOTES';
-    case ItemType.sshKey:     return 'SSH KEYS';
-    case ItemType.wifi:       return 'WI-FI';
-    case null:                return 'ALL ITEMS';
-    default:                  return 'ITEMS';
-  }
+const double _kRowHeight = 52;
+
+// ── Actions usable from anywhere (shortcuts, buttons) ───────────────────────
+
+/// Moves the selection up/down the visible list.
+void moveSelection(WidgetRef ref, int delta) {
+  final state = ref.read(appStateProvider);
+  final items = state.filteredItems;
+  if (items.isEmpty) return;
+  final idx = items.indexWhere((i) => i.id == state.selectedItem?.id);
+  final next = idx < 0 ? (delta > 0 ? 0 : items.length - 1) : (idx + delta).clamp(0, items.length - 1);
+  ref.read(appStateProvider.notifier).selectItem(items[next]);
 }
 
+/// ⇧⌘C: copy the selected item's password (or Wi-Fi password).
+void copySelectedPassword(BuildContext context, WidgetRef ref) {
+  final item = ref.read(appStateProvider).selectedItem;
+  final pw = item?.login?.password ?? item?.wifi?.password ?? '';
+  if (pw.isEmpty) {
+    showToast(context, 'No password on this item', icon: Icons.info_outline_rounded);
+    return;
+  }
+  copyToClipboard(context, pw, label: 'Password', secret: true);
+}
+
+/// Opens the new-item flow. If the sidebar is filtered to a type we can
+/// create, skip straight to that form.
+void openNewItem(BuildContext context, WidgetRef ref) {
+  final cat = ref.read(appStateProvider).selectedCategory;
+  final preset = _creatableTypes.where((t) => t == cat).firstOrNull;
+  showDialog(context: context, builder: (_) => NewItemDialog(initialType: preset));
+}
+
+String _paneTitle(AppState s) {
+  if (s.selectedFolderId != null) {
+    for (final f in s.folders) {
+      if (f.id == s.selectedFolderId) return f.name;
+    }
+  }
+  return s.selectedCategory == null ? 'All items' : kindOf(s.selectedCategory).plural;
+}
+
+// ── Pane ────────────────────────────────────────────────────────────────────
+
 class ItemListPane extends ConsumerWidget {
-  const ItemListPane({super.key});
+  /// Leave room for the window's traffic-light buttons.
+  final bool leadingInset;
+
+  /// Shown as a sidebar button when the sidebar isn't visible.
+  final VoidCallback? onShowSidebar;
+
+  const ItemListPane({super.key, this.leadingInset = false, this.onShowSidebar});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final c = Theme.of(context).extension<ProtonifyColors>()!;
+    final c = context.c;
     final state = ref.watch(appStateProvider);
 
-    return Container(
+    return Material(
       color: c.surface,
       child: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 12, 6, 8),
+          PaneHeader(
+            padding: EdgeInsets.only(left: leadingInset ? kTrafficLightInset : 10, right: 10),
             child: Row(
               children: [
-                Text(
-                  _categoryLabel(state.selectedCategory),
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-                const Spacer(),
-                if (!state.loadingItems)
-                  Text('${state.filteredItems.length}',
-                      style: Theme.of(context).textTheme.labelSmall),
-                const SizedBox(width: 6),
-                _NewItemButton(c: c),
+                if (onShowSidebar != null) ...[
+                  AppIconButton(
+                    icon: Icons.view_sidebar_outlined,
+                    tooltip: 'Show sidebar  ⌃⌘S',
+                    onPressed: onShowSidebar,
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                const Expanded(child: _SearchField()),
+                const SizedBox(width: 8),
+                _NewButton(onTap: () => openNewItem(context, ref)),
               ],
             ),
           ),
-          Expanded(child: _ItemListBody(c: c)),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 14, 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    state.searchQuery.isEmpty ? _paneTitle(state) : 'Results',
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: c.onSurface),
+                  ),
+                ),
+                if (!state.loadingItems)
+                  Text('${state.filteredItems.length}',
+                      style: TextStyle(fontSize: 12, color: c.faint)),
+              ],
+            ),
+          ),
+          const Expanded(child: _ItemListBody()),
         ],
       ),
     );
   }
 }
 
-class _NewItemButton extends StatefulWidget {
-  final ProtonifyColors c;
-  const _NewItemButton({required this.c});
-
-  @override
-  State<_NewItemButton> createState() => _NewItemButtonState();
-}
-
-class _NewItemButtonState extends State<_NewItemButton> {
-  bool _hovered = false;
+class _NewButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _NewButton({required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        onTap: () => showDialog(
-          context: context,
-          builder: (_) => const NewItemDialog(),
-        ),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          width: 22,
-          height: 22,
-          decoration: BoxDecoration(
-            color: _hovered
-                ? widget.c.accent.withValues(alpha: 0.2)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(6),
+    final c = context.c;
+    return Tooltip(
+      message: 'New item  ⌘N',
+      child: HoverBuilder(
+        cursor: SystemMouseCursors.click,
+        builder: (context, hovered) => GestureDetector(
+          onTap: onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 100),
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              color: hovered ? Color.lerp(c.accent, Colors.white, 0.1) : c.accent,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(Icons.add_rounded, size: 18, color: Colors.white),
           ),
-          child: Icon(Icons.add, size: 16, color: widget.c.subtle),
         ),
       ),
     );
   }
 }
 
-class _ItemListBody extends ConsumerWidget {
-  final ProtonifyColors c;
-  const _ItemListBody({required this.c});
+class _SearchField extends ConsumerStatefulWidget {
+  const _SearchField();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(appStateProvider);
+  ConsumerState<_SearchField> createState() => _SearchFieldState();
+}
 
-    if (state.loadingItems) {
-      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+class _SearchFieldState extends ConsumerState<_SearchField> {
+  late final TextEditingController _controller =
+      TextEditingController(text: ref.read(appStateProvider).searchQuery);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent e) {
+    if (e is! KeyDownEvent && e is! KeyRepeatEvent) return KeyEventResult.ignored;
+    switch (e.logicalKey) {
+      case LogicalKeyboardKey.arrowDown:
+        moveSelection(ref, 1);
+        return KeyEventResult.handled;
+      case LogicalKeyboardKey.arrowUp:
+        moveSelection(ref, -1);
+        return KeyEventResult.handled;
+      case LogicalKeyboardKey.enter:
+        final s = ref.read(appStateProvider);
+        if (s.selectedItem == null && s.filteredItems.isNotEmpty) {
+          ref.read(appStateProvider.notifier).selectItem(s.filteredItems.first);
+        }
+        return KeyEventResult.handled;
+      case LogicalKeyboardKey.escape:
+        if (_controller.text.isNotEmpty) {
+          ref.read(appStateProvider.notifier).setSearch('');
+        } else {
+          ref.read(searchFocusProvider).unfocus();
+        }
+        return KeyEventResult.handled;
+      default:
+        return KeyEventResult.ignored;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    ref.listen<String>(appStateProvider.select((s) => s.searchQuery), (_, next) {
+      if (_controller.text != next) {
+        _controller.value = TextEditingValue(
+          text: next,
+          selection: TextSelection.collapsed(offset: next.length),
+        );
+      }
+    });
+    final focus = ref.watch(searchFocusProvider);
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: _onKey,
+      child: SizedBox(
+        height: 30,
+        child: ValueListenableBuilder(
+          valueListenable: _controller,
+          builder: (context, value, _) => TextField(
+            controller: _controller,
+            focusNode: focus,
+            onChanged: ref.read(appStateProvider.notifier).setSearch,
+            style: TextStyle(fontSize: 13, color: c.onSurface),
+            textAlignVertical: TextAlignVertical.center,
+            decoration: InputDecoration(
+              hintText: 'Search',
+              contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+              prefixIcon: Icon(Icons.search_rounded, size: 16, color: c.faint),
+              prefixIconConstraints: const BoxConstraints(minWidth: 32),
+              suffixIconConstraints: const BoxConstraints(minWidth: 30),
+              suffixIcon: value.text.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.only(right: 6),
+                      child: Center(widthFactor: 1, child: KeyHint('⌘F')),
+                    )
+                  : MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: GestureDetector(
+                        onTap: () => ref.read(appStateProvider.notifier).setSearch(''),
+                        child: Icon(Icons.cancel_rounded, size: 15, color: c.faint),
+                      ),
+                    ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── List body ───────────────────────────────────────────────────────────────
+
+class _ItemListBody extends ConsumerStatefulWidget {
+  const _ItemListBody();
+
+  @override
+  ConsumerState<_ItemListBody> createState() => _ItemListBodyState();
+}
+
+class _ItemListBodyState extends ConsumerState<_ItemListBody> {
+  final _scroll = ScrollController();
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// Keep the selected row visible when moving with the keyboard.
+  void _ensureVisible(String? id) {
+    if (id == null || !_scroll.hasClients) return;
+    final items = ref.read(appStateProvider).filteredItems;
+    final idx = items.indexWhere((i) => i.id == id);
+    if (idx < 0) return;
+    final top = idx * _kRowHeight + 4;
+    final bottom = top + _kRowHeight;
+    final pos = _scroll.position;
+    double? target;
+    if (top < pos.pixels) target = top - 4;
+    if (bottom > pos.pixels + pos.viewportDimension) target = bottom - pos.viewportDimension + 4;
+    if (target != null) {
+      _scroll.animateTo(target.clamp(0, pos.maxScrollExtent),
+          duration: const Duration(milliseconds: 120), curve: Curves.easeOut);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final state = ref.watch(appStateProvider);
+    ref.listen<String?>(appStateProvider.select((s) => s.selectedItem?.id), (_, id) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _ensureVisible(id));
+    });
+
+    if (state.loadingItems || (state.loadingVaults && state.items.isEmpty)) {
+      return const _SkeletonList();
     }
 
     if (state.error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Text(state.error!,
-              style: TextStyle(color: c.subtle, fontSize: 12)),
+      return _EmptyState(
+        icon: Icons.cloud_off_rounded,
+        title: 'Couldn’t load your vaults',
+        message: friendlyError(state.error!),
+        action: AppButton(
+          label: 'Try again',
+          icon: Icons.refresh_rounded,
+          onPressed: () => ref.read(appStateProvider.notifier).loadVaults(),
         ),
       );
     }
 
     final items = state.filteredItems;
     if (items.isEmpty) {
-      final hasFilter =
-          state.searchQuery.isNotEmpty || state.selectedCategory != null;
-      if (hasFilter && state.items.isNotEmpty) {
-        return Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('No matching items', style: TextStyle(color: c.subtle)),
-              const SizedBox(height: 12),
-              _ClearFilterButton(c: c),
-            ],
-          ),
+      final notifier = ref.read(appStateProvider.notifier);
+      if (state.searchQuery.isNotEmpty) {
+        return _EmptyState(
+          icon: Icons.search_off_rounded,
+          title: 'No results',
+          message: 'Nothing matches “${state.searchQuery}”'
+              '${state.selectedCategory != null || state.selectedFolderId != null ? ' in ${_paneTitle(state)}' : ''}.',
+          action: AppButton(label: 'Clear search', onPressed: () => notifier.setSearch('')),
         );
       }
-      return Center(
-          child: Text('No items', style: TextStyle(color: c.subtle)));
+      if (state.items.isNotEmpty) {
+        return _EmptyState(
+          icon: state.selectedFolderId != null
+              ? Icons.folder_open_rounded
+              : kindOf(state.selectedCategory).icon,
+          title: 'Nothing in ${_paneTitle(state)} yet',
+          message: state.selectedFolderId != null
+              ? 'Move items here from their detail view.'
+              : null,
+          action: AppButton(label: 'Show all items', onPressed: () => notifier.selectCategory(null)),
+        );
+      }
+      return _EmptyState(
+        icon: Icons.shield_outlined,
+        title: 'Your vault is empty',
+        message: 'Add your first login, note, card or Wi-Fi network.',
+        action: AppButton.primary(
+          label: 'New item',
+          icon: Icons.add_rounded,
+          onPressed: () => openNewItem(context, ref),
+        ),
+      );
     }
 
-    return ListView.builder(
-      itemCount: items.length,
-      itemBuilder: (ctx, i) => _ItemRow(item: items[i], c: c),
-    );
-  }
-}
-
-class _ClearFilterButton extends ConsumerStatefulWidget {
-  final ProtonifyColors c;
-  const _ClearFilterButton({required this.c});
-
-  @override
-  ConsumerState<_ClearFilterButton> createState() => _ClearFilterButtonState();
-}
-
-class _ClearFilterButtonState extends ConsumerState<_ClearFilterButton> {
-  bool _hovered = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = widget.c;
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: () {
-          final notifier = ref.read(appStateProvider.notifier);
-          notifier.setSearch('');
-          notifier.selectCategory(null);
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 100),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-          decoration: BoxDecoration(
-            color: _hovered
-                ? c.accent.withValues(alpha: 0.2)
-                : c.surfaceVariant.withValues(alpha: 0.6),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.close, size: 13, color: c.subtle),
-              const SizedBox(width: 6),
-              Text(
-                'Clear filter',
-                style: TextStyle(fontSize: 12, color: c.onSurface),
-              ),
-            ],
-          ),
+    return Scrollbar(
+      controller: _scroll,
+      child: ListView.builder(
+        controller: _scroll,
+        padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+        itemExtent: _kRowHeight,
+        itemCount: items.length,
+        itemBuilder: (ctx, i) => _ItemRow(
+          item: items[i],
+          selected: state.selectedItem?.id == items[i].id,
+          subtitleFallback: c.faint,
         ),
       ),
     );
   }
 }
 
-class _ItemRow extends ConsumerStatefulWidget {
-  final PassItem item;
-  final ProtonifyColors c;
-  const _ItemRow({required this.item, required this.c});
-
-  @override
-  ConsumerState<_ItemRow> createState() => _ItemRowState();
-}
-
-class _ItemRowState extends ConsumerState<_ItemRow> {
-  bool _hovered = false;
+class _EmptyState extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String? message;
+  final Widget? action;
+  const _EmptyState({required this.icon, required this.title, this.message, this.action});
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(appStateProvider);
-    final selected = state.selectedItem?.id == widget.item.id;
-    final c = widget.c;
+    final c = context.c;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 30, color: c.faint),
+            const SizedBox(height: 12),
+            Text(title,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: c.onSurface)),
+            if (message != null) ...[
+              const SizedBox(height: 4),
+              Text(message!,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, height: 1.4, color: c.subtle)),
+            ],
+            if (action != null) ...[const SizedBox(height: 14), action!],
+          ],
+        ),
+      ),
+    );
+  }
+}
 
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        onTap: () =>
-            ref.read(appStateProvider.notifier).selectItem(widget.item),
+class _SkeletonList extends StatelessWidget {
+  const _SkeletonList();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final bar = c.surfaceVariant.withValues(alpha: 0.7);
+    return ListView.builder(
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(18, 4, 18, 0),
+      itemExtent: _kRowHeight,
+      itemCount: 10,
+      itemBuilder: (_, i) => Row(
+        children: [
+          Container(width: 32, height: 32, decoration: BoxDecoration(color: bar, borderRadius: BorderRadius.circular(9))),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                FractionallySizedBox(
+                  widthFactor: 0.4 + (i * 37 % 40) / 100,
+                  child: Container(height: 9, decoration: BoxDecoration(color: bar, borderRadius: BorderRadius.circular(4))),
+                ),
+                const SizedBox(height: 7),
+                FractionallySizedBox(
+                  widthFactor: 0.3 + (i * 53 % 30) / 100,
+                  child: Container(height: 7, decoration: BoxDecoration(color: bar.withValues(alpha: 0.5), borderRadius: BorderRadius.circular(4))),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ItemRow extends ConsumerWidget {
+  final PassItem item;
+  final bool selected;
+  final Color subtitleFallback;
+  const _ItemRow({required this.item, required this.selected, required this.subtitleFallback});
+
+  String _subtitle() {
+    if (item.displayUsername.isNotEmpty) return item.displayUsername;
+    switch (item.type) {
+      case ItemType.wifi:
+        return item.wifi?.ssid ?? '';
+      case ItemType.creditCard:
+        final n = item.creditCard?.number ?? '';
+        return n.length >= 4 ? '•••• ${n.substring(n.length - 4)}' : (item.creditCard?.cardholderName ?? '');
+      case ItemType.identity:
+        return item.identity?.fullName ?? '';
+      case ItemType.note:
+        return item.note.split('\n').first;
+      default:
+        return '';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.c;
+    final sub = _subtitle();
+    return HoverBuilder(
+      builder: (context, hovered) => GestureDetector(
+        onTap: () => ref.read(appStateProvider.notifier).selectItem(item),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 100),
-          margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          duration: const Duration(milliseconds: 90),
+          margin: const EdgeInsets.symmetric(vertical: 1),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
           decoration: BoxDecoration(
             color: selected
-                ? c.accent.withValues(alpha: 0.2)
-                : _hovered
+                ? c.accentSoft
+                : hovered
                     ? c.surfaceVariant.withValues(alpha: 0.6)
                     : Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(9),
           ),
           child: Row(
             children: [
-              _ItemIcon(item: widget.item, selected: selected, c: c),
-              const SizedBox(width: 10),
+              KindChip(kind: kindOf(item.type)),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      widget.item.title,
+                      item.title.isEmpty ? 'Untitled' : item.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w500,
-                        color: selected ? c.accent : c.onSurface,
+                        color: c.onSurface,
                       ),
-                      overflow: TextOverflow.ellipsis,
                     ),
-                    if (widget.item.displayUsername.isNotEmpty)
-                      Text(
-                        widget.item.displayUsername,
-                        style: TextStyle(fontSize: 11, color: c.subtle),
-                        overflow: TextOverflow.ellipsis,
+                    if (sub.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 1),
+                        child: Text(
+                          sub,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 12, color: c.subtle),
+                        ),
                       ),
                   ],
                 ),
               ),
-              if (widget.item.primaryTotpUri.isNotEmpty)
-                _OtpBadge(uri: widget.item.primaryTotpUri, c: c),
+              if (item.primaryTotpUri.isNotEmpty) _OtpBadge(uri: item.primaryTotpUri),
             ],
           ),
         ),
@@ -267,111 +510,45 @@ class _ItemRowState extends ConsumerState<_ItemRow> {
   }
 }
 
-class _ItemIcon extends StatelessWidget {
-  final PassItem item;
-  final bool selected;
-  final ProtonifyColors c;
-  const _ItemIcon({required this.item, required this.selected, required this.c});
+// ── New / edit item dialog ──────────────────────────────────────────────────
 
-  @override
-  Widget build(BuildContext context) {
-    IconData icon;
-    Color bg;
-
-    switch (item.type) {
-      case ItemType.login:
-        icon = Icons.language;
-        bg = const Color(0xFF4A6FFF);
-      case ItemType.note:
-        icon = Icons.notes;
-        bg = const Color(0xFFFF9500);
-      case ItemType.creditCard:
-        icon = Icons.credit_card;
-        bg = const Color(0xFF34C759);
-      case ItemType.identity:
-        icon = Icons.person_outline;
-        bg = const Color(0xFFFF375F);
-      case ItemType.alias:
-        icon = Icons.alternate_email;
-        bg = const Color(0xFF5AC8FA);
-      default:
-        icon = Icons.key_outlined;
-        bg = c.surfaceVariant;
-    }
-
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(
-        color: bg.withValues(alpha: selected ? 1.0 : 0.85),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Icon(icon, size: 16, color: Colors.white),
-    );
-  }
-}
-
-class _NewItemType {
-  final String label;
-  final IconData icon;
-  final Color color;
-  final ItemType type;
-  const _NewItemType({required this.label, required this.icon, required this.color, required this.type});
-}
-
-const _newItemTypes = [
-  _NewItemType(label: 'Login',    icon: Icons.language,        color: Color(0xFF4A6FFF), type: ItemType.login),
-  _NewItemType(label: 'Alias',    icon: Icons.alternate_email, color: Color(0xFF5AC8FA), type: ItemType.alias),
-  _NewItemType(label: 'Card',     icon: Icons.credit_card,     color: Color(0xFF34C759), type: ItemType.creditCard),
-  _NewItemType(label: 'Identity', icon: Icons.person_outline,  color: Color(0xFFFF375F), type: ItemType.identity),
-  _NewItemType(label: 'Note',     icon: Icons.notes,           color: Color(0xFFFF9500), type: ItemType.note),
-  _NewItemType(label: 'Wi-Fi',    icon: Icons.wifi,            color: Color(0xFF32ADE6), type: ItemType.wifi),
-  _NewItemType(label: 'SSH Key',  icon: Icons.key_outlined,    color: Color(0xFFBF5AF2), type: ItemType.sshKey),
-];
-
-// ── Dialog shell ─────────────────────────────────────────────────────────────
+/// Types the CLI integration can create and edit.
+const _creatableTypes = [ItemType.login, ItemType.note, ItemType.creditCard, ItemType.wifi];
 
 class NewItemDialog extends StatefulWidget {
   final PassItem? editItem;
-  const NewItemDialog({super.key, this.editItem});
+  final ItemType? initialType;
+  const NewItemDialog({super.key, this.editItem, this.initialType});
 
   @override
   State<NewItemDialog> createState() => _NewItemDialogState();
 }
 
 class _NewItemDialogState extends State<NewItemDialog> {
-  _NewItemType? _selected;
+  ItemType? _selected;
 
   @override
   void initState() {
     super.initState();
-    if (widget.editItem != null) {
-      _selected = _newItemTypes.cast<_NewItemType?>().firstWhere(
-        (t) => t!.type == widget.editItem!.type,
-        orElse: () => null,
-      );
-    }
+    _selected = widget.editItem?.type ?? widget.initialType;
   }
 
   @override
   Widget build(BuildContext context) {
-    final c = Theme.of(context).extension<ProtonifyColors>()!;
     final isEdit = widget.editItem != null;
-
+    final maxW = MediaQuery.sizeOf(context).width - 48;
     return Dialog(
-      backgroundColor: c.surface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: SizedBox(
-        width: 380,
+      insetPadding: const EdgeInsets.all(24),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: 440.clamp(260, maxW).toDouble()),
         child: AnimatedSize(
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOutQuart,
           alignment: Alignment.topCenter,
           child: _selected == null
-              ? _TypePicker(c: c, onPick: (t) => setState(() => _selected = t))
+              ? _TypePicker(onPick: (t) => setState(() => _selected = t))
               : _CreationForm(
                   type: _selected!,
-                  c: c,
                   editItem: widget.editItem,
                   onBack: isEdit ? null : () => setState(() => _selected = null),
                 ),
@@ -381,15 +558,13 @@ class _NewItemDialogState extends State<NewItemDialog> {
   }
 }
 
-// ── Type picker ───────────────────────────────────────────────────────────────
-
 class _TypePicker extends StatelessWidget {
-  final ProtonifyColors c;
-  final void Function(_NewItemType) onPick;
-  const _TypePicker({required this.c, required this.onPick});
+  final void Function(ItemType) onPick;
+  const _TypePicker({required this.onPick});
 
   @override
   Widget build(BuildContext context) {
+    final c = context.c;
     return Padding(
       padding: const EdgeInsets.all(20),
       child: Column(
@@ -399,56 +574,63 @@ class _TypePicker extends StatelessWidget {
           Text('New item',
               style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: c.onSurface)),
           const SizedBox(height: 4),
-          Text('Choose a type', style: TextStyle(fontSize: 12, color: c.subtle)),
+          Text('What would you like to save?', style: TextStyle(fontSize: 12.5, color: c.subtle)),
           const SizedBox(height: 16),
-          ..._newItemTypes.map((t) => _TypeTile(type: t, c: c, onTap: () => onPick(t))),
+          LayoutBuilder(builder: (context, box) {
+            final cols = box.maxWidth > 320 ? 2 : 1;
+            final w = (box.maxWidth - (cols - 1) * 8) / cols;
+            return Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final t in _creatableTypes)
+                  SizedBox(width: w, child: _TypeTile(type: t, onTap: () => onPick(t))),
+              ],
+            );
+          }),
+          const SizedBox(height: 14),
+          Text('Aliases, identities and SSH keys can be created in the Proton Pass app.',
+              style: TextStyle(fontSize: 11.5, color: c.faint)),
+          const SizedBox(height: 14),
+          Align(
+            alignment: Alignment.centerRight,
+            child: AppButton(label: 'Cancel', onPressed: () => Navigator.of(context).pop()),
+          ),
         ],
       ),
     );
   }
 }
 
-class _TypeTile extends StatefulWidget {
-  final _NewItemType type;
-  final ProtonifyColors c;
+class _TypeTile extends StatelessWidget {
+  final ItemType type;
   final VoidCallback onTap;
-  const _TypeTile({required this.type, required this.c, required this.onTap});
-
-  @override
-  State<_TypeTile> createState() => _TypeTileState();
-}
-
-class _TypeTileState extends State<_TypeTile> {
-  bool _hovered = false;
+  const _TypeTile({required this.type, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
+    final c = context.c;
+    final kind = kindOf(type);
+    return HoverBuilder(
+      cursor: SystemMouseCursors.click,
+      builder: (context, hovered) => GestureDetector(
+        onTap: onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 100),
-          margin: const EdgeInsets.only(bottom: 4),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            color: _hovered ? widget.c.surfaceVariant.withValues(alpha: 0.7) : Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
+            color: hovered ? c.surfaceVariant.withValues(alpha: 0.7) : c.surface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: hovered ? c.accent.withValues(alpha: 0.5) : c.border),
           ),
           child: Row(
             children: [
-              Container(
-                width: 30,
-                height: 30,
-                decoration: BoxDecoration(color: widget.type.color, borderRadius: BorderRadius.circular(7)),
-                child: Icon(widget.type.icon, size: 15, color: Colors.white),
-              ),
+              KindChip(kind: kind, size: 30),
               const SizedBox(width: 12),
-              Text(widget.type.label,
-                  style: TextStyle(fontSize: 13, color: widget.c.onSurface)),
-              const Spacer(),
-              Icon(Icons.chevron_right, size: 16, color: widget.c.subtle),
+              Expanded(
+                child: Text(kind.label,
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: c.onSurface)),
+              ),
             ],
           ),
         ),
@@ -457,14 +639,11 @@ class _TypeTileState extends State<_TypeTile> {
   }
 }
 
-// ── Creation form ─────────────────────────────────────────────────────────────
-
 class _CreationForm extends ConsumerStatefulWidget {
-  final _NewItemType type;
-  final ProtonifyColors c;
+  final ItemType type;
   final PassItem? editItem;
   final VoidCallback? onBack;
-  const _CreationForm({required this.type, required this.c, this.editItem, this.onBack});
+  const _CreationForm({required this.type, this.editItem, this.onBack});
 
   @override
   ConsumerState<_CreationForm> createState() => _CreationFormState();
@@ -503,7 +682,6 @@ class _CreationFormState extends ConsumerState<_CreationForm> {
     if (item != null) {
       _title.text = item.title;
       _note.text = item.note;
-      // Find the vault name from vaults list using vaultId
       if (item.login != null) {
         _email.text = item.login!.email;
         _username.text = item.login!.username;
@@ -524,14 +702,10 @@ class _CreationFormState extends ConsumerState<_CreationForm> {
         if (sec.isNotEmpty) _wifiSecurity = sec;
       }
     } else {
-      // Pre-select the vault matching the currently-focused folder, if any.
-      // Runs after first frame so ref is valid.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        final state = ref.read(appStateProvider);
-        final v = state.selectedFolderVault;
-        if (v != null) setState(() => _selectedVault = v.name);
-      });
+      // Default to the vault of the selected folder, else the first vault.
+      final state = ref.read(appStateProvider);
+      _selectedVault = state.selectedFolderVault?.name ??
+          (state.vaults.isNotEmpty ? state.vaults.first.name : null);
     }
   }
 
@@ -546,9 +720,10 @@ class _CreationFormState extends ConsumerState<_CreationForm> {
   }
 
   Future<void> _submit() async {
+    if (_submitting) return;
     if (!_formKey.currentState!.validate()) return;
     if (!_isEdit && _selectedVault == null) {
-      setState(() => _error = 'Please select a vault');
+      setState(() => _error = 'Choose a vault');
       return;
     }
     setState(() { _submitting = true; _error = null; });
@@ -558,7 +733,7 @@ class _CreationFormState extends ConsumerState<_CreationForm> {
         final fields = <String, String>{};
         fields['title'] = _title.text.trim();
         fields['note'] = _note.text.trim();
-        switch (widget.type.type) {
+        switch (widget.type) {
           case ItemType.login:
             fields['email'] = _email.text.trim();
             fields['username'] = _username.text.trim();
@@ -588,7 +763,7 @@ class _CreationFormState extends ConsumerState<_CreationForm> {
         final folderId = (folderVault != null && folderVault.name == _selectedVault)
             ? state.selectedFolderId
             : null;
-        switch (widget.type.type) {
+        switch (widget.type) {
           case ItemType.login:
             await notifier.createLogin(
               vaultName: _selectedVault!,
@@ -633,352 +808,287 @@ class _CreationFormState extends ConsumerState<_CreationForm> {
         }
         ref.read(appStateProvider.notifier).loadVaults();
       }
-      if (mounted) Navigator.of(context).pop();
+      if (mounted) {
+        final label = kindOf(widget.type).label;
+        showToast(context, _isEdit ? 'Saved changes' : '$label created');
+        Navigator.of(context).pop();
+      }
     } catch (e) {
-      if (mounted) setState(() { _error = e.toString(); _submitting = false; });
+      if (mounted) setState(() { _error = friendlyError(e); _submitting = false; });
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final vaults = ref.watch(appStateProvider).vaults;
-    final c = widget.c;
+    final c = context.c;
+    final kind = kindOf(widget.type);
 
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.enter, meta: true): _submit,
+        const SingleActivator(LogicalKeyboardKey.keyS, meta: true): _submit,
+      },
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.85),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // header
-            Row(
-              children: [
-                if (widget.onBack != null) ...[
-                  GestureDetector(
-                    onTap: widget.onBack,
-                    child: Icon(Icons.arrow_back_ios_new, size: 14, color: c.subtle),
-                  ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 16, 20, 12),
+              child: Row(
+                children: [
+                  if (widget.onBack != null) ...[
+                    AppIconButton(icon: Icons.arrow_back_rounded, tooltip: 'Back', onPressed: widget.onBack),
+                    const SizedBox(width: 6),
+                  ] else
+                    const SizedBox(width: 6),
+                  KindChip(kind: kind, size: 26),
                   const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(_isEdit ? 'Edit ${kind.label.toLowerCase()}' : 'New ${kind.label.toLowerCase()}',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: c.onSurface)),
+                  ),
                 ],
-                Container(
-                  width: 24, height: 24,
-                  decoration: BoxDecoration(color: widget.type.color, borderRadius: BorderRadius.circular(6)),
-                  child: Icon(widget.type.icon, size: 13, color: Colors.white),
-                ),
-                const SizedBox(width: 10),
-                Text(_isEdit ? 'Edit ${widget.type.label}' : 'New ${widget.type.label}',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: widget.c.onSurface)),
-              ],
-            ),
-            const SizedBox(height: 20),
-            // vault picker (only for new items)
-            if (!_isEdit) ...[
-              _FormLabel('Vault', c),
-              const SizedBox(height: 6),
-              _VaultDropdown(
-                vaults: vaults,
-                value: _selectedVault,
-                c: c,
-                onChanged: (v) => setState(() => _selectedVault = v),
               ),
-              const SizedBox(height: 12),
-            ],
-            // title (all types)
-            _FormLabel('Title', c),
-            const SizedBox(height: 6),
-            _Field(controller: _title, hint: 'Title', c: c,
-                validator: (v) => (v == null || v.trim().isEmpty) ? 'Required' : null),
-            // type-specific fields
-            ..._typeFields(c),
-            if (_error != null) ...[
-              const SizedBox(height: 10),
-              Text(_error!, style: const TextStyle(fontSize: 12, color: Color(0xFFFF375F))),
-            ],
-            const SizedBox(height: 20),
-            // actions
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                _DialogButton(label: 'Cancel', c: c, onTap: () => Navigator.of(context).pop()),
-                const SizedBox(width: 8),
-                _DialogButton(
-                  label: _submitting ? 'Saving…' : 'Save',
-                  c: c,
-                  primary: true,
-                  onTap: _submitting ? null : _submit,
+            ),
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (!_isEdit && vaults.length > 1) ...[
+                        const _FormLabel('Vault'),
+                        DropdownButtonFormField<String>(
+                          initialValue: _selectedVault,
+                          isDense: true,
+                          dropdownColor: c.elevated,
+                          borderRadius: BorderRadius.circular(10),
+                          style: TextStyle(fontSize: 13, color: c.onSurface),
+                          icon: Icon(Icons.expand_more_rounded, size: 18, color: c.subtle),
+                          items: [for (final v in vaults) DropdownMenuItem(value: v.name, child: Text(v.name))],
+                          onChanged: (v) => setState(() => _selectedVault = v),
+                        ),
+                        const SizedBox(height: 14),
+                      ],
+                      const _FormLabel('Title'),
+                      _Field(
+                        controller: _title,
+                        hint: switch (widget.type) {
+                          ItemType.login => 'e.g. GitHub',
+                          ItemType.wifi => 'e.g. Home network',
+                          ItemType.creditCard => 'e.g. Visa debit',
+                          _ => 'Title',
+                        },
+                        autofocus: true,
+                        onSubmit: _submit,
+                        validator: (v) => (v == null || v.trim().isEmpty) ? 'Give it a title' : null,
+                      ),
+                      ..._typeFields(c),
+                    ],
+                  ),
                 ),
-              ],
+              ),
+            ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: c.danger.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Icon(Icons.error_outline_rounded, size: 16, color: c.danger),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(_error!, style: TextStyle(fontSize: 12, color: c.danger))),
+                  ]),
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 16),
+              child: Row(
+                children: [
+                  Text('⌘S to save', style: TextStyle(fontSize: 11, color: c.faint)),
+                  const Spacer(),
+                  AppButton(label: 'Cancel', onPressed: () => Navigator.of(context).pop()),
+                  const SizedBox(width: 8),
+                  AppButton.primary(
+                    label: _isEdit ? 'Save' : 'Create',
+                    loading: _submitting,
+                    onPressed: _submit,
+                  ),
+                ],
+              ),
             ),
           ],
         ),
       ),
-    ),
-  );
+    );
   }
 
   List<Widget> _typeFields(ProtonifyColors c) {
-    switch (widget.type.type) {
+    const gap = SizedBox(height: 14);
+    switch (widget.type) {
       case ItemType.login:
         return [
-          const SizedBox(height: 12),
-          _FormLabel('Email', c),
-          const SizedBox(height: 6),
-          _Field(controller: _email, hint: 'email@example.com', c: c, keyboardType: TextInputType.emailAddress),
-          const SizedBox(height: 12),
-          _FormLabel('Username', c),
-          const SizedBox(height: 6),
-          _Field(controller: _username, hint: 'username', c: c),
-          const SizedBox(height: 12),
-          _FormLabel('Password', c),
-          const SizedBox(height: 6),
-          _PasswordFieldWithTools(controller: _password, c: c),
-          const SizedBox(height: 12),
-          _FormLabel('URL', c),
-          const SizedBox(height: 6),
-          _Field(controller: _url, hint: 'https://', c: c, keyboardType: TextInputType.url),
+          gap,
+          const _FormLabel('Email'),
+          _Field(controller: _email, hint: 'name@example.com', keyboardType: TextInputType.emailAddress, onSubmit: _submit),
+          gap,
+          const _FormLabel('Username', optional: true),
+          _Field(controller: _username, hint: 'username', onSubmit: _submit),
+          gap,
+          const _FormLabel('Password'),
+          _PasswordFieldWithTools(controller: _password),
+          gap,
+          const _FormLabel('Website', optional: true),
+          _Field(controller: _url, hint: 'https://', keyboardType: TextInputType.url, onSubmit: _submit),
+          gap,
+          const _FormLabel('Note', optional: true),
+          _Field(controller: _note, hint: 'Anything else worth remembering', maxLines: 3),
         ];
       case ItemType.note:
         return [
-          const SizedBox(height: 12),
-          _FormLabel('Note', c),
-          const SizedBox(height: 6),
-          _Field(controller: _note, hint: 'Note content', c: c, maxLines: 4),
+          gap,
+          const _FormLabel('Note'),
+          _Field(controller: _note, hint: 'Write something…', maxLines: 8),
         ];
       case ItemType.wifi:
         return [
-          const SizedBox(height: 12),
-          _FormLabel('Network name (SSID)', c),
-          const SizedBox(height: 6),
-          _Field(controller: _ssid, hint: 'MyWiFi', c: c),
-          const SizedBox(height: 12),
-          _FormLabel('Password', c),
-          const SizedBox(height: 6),
-          _PasswordFieldWithTools(controller: _password, c: c),
-          const SizedBox(height: 12),
-          _FormLabel('Security', c),
-          const SizedBox(height: 6),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            decoration: BoxDecoration(
-              color: c.surfaceVariant,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: DropdownButtonHideUnderline(
-              child: DropdownButton<String>(
-                value: _wifiSecurity,
-                isExpanded: true,
-                dropdownColor: c.surfaceVariant,
-                style: TextStyle(fontSize: 13, color: c.onSurface),
-                icon: Icon(Icons.expand_more, size: 16, color: c.subtle),
-                items: const [
-                  DropdownMenuItem(value: 'wpa3', child: Text('WPA3')),
-                  DropdownMenuItem(value: 'wpa2', child: Text('WPA2')),
-                  DropdownMenuItem(value: 'wpa',  child: Text('WPA')),
-                  DropdownMenuItem(value: 'wep',  child: Text('WEP')),
-                  DropdownMenuItem(value: 'open', child: Text('Open')),
-                  DropdownMenuItem(value: 'none', child: Text('None')),
-                ],
-                onChanged: (v) => setState(() => _wifiSecurity = v ?? 'wpa2'),
-              ),
-            ),
+          gap,
+          const _FormLabel('Network name (SSID)'),
+          _Field(controller: _ssid, hint: 'MyWiFi', onSubmit: _submit),
+          gap,
+          const _FormLabel('Password'),
+          _PasswordFieldWithTools(controller: _password),
+          gap,
+          const _FormLabel('Security'),
+          DropdownButtonFormField<String>(
+            initialValue: _wifiSecurity,
+            isDense: true,
+            dropdownColor: c.elevated,
+            borderRadius: BorderRadius.circular(10),
+            style: TextStyle(fontSize: 13, color: c.onSurface),
+            icon: Icon(Icons.expand_more_rounded, size: 18, color: c.subtle),
+            items: const [
+              DropdownMenuItem(value: 'wpa3', child: Text('WPA3')),
+              DropdownMenuItem(value: 'wpa2', child: Text('WPA2')),
+              DropdownMenuItem(value: 'wpa',  child: Text('WPA')),
+              DropdownMenuItem(value: 'wep',  child: Text('WEP')),
+              DropdownMenuItem(value: 'open', child: Text('Open')),
+              DropdownMenuItem(value: 'none', child: Text('None')),
+            ],
+            onChanged: (v) => setState(() => _wifiSecurity = v ?? 'wpa2'),
           ),
-          const SizedBox(height: 12),
-          _FormLabel('Note', c),
-          const SizedBox(height: 6),
-          _Field(controller: _note, hint: 'Optional note', c: c, maxLines: 2),
+          gap,
+          const _FormLabel('Note', optional: true),
+          _Field(controller: _note, hint: 'Optional note', maxLines: 2),
         ];
       case ItemType.creditCard:
         return [
-          const SizedBox(height: 12),
-          _FormLabel('Cardholder name', c),
-          const SizedBox(height: 6),
-          _Field(controller: _cardholderName, hint: 'Name on card', c: c),
-          const SizedBox(height: 12),
-          _FormLabel('Card number', c),
-          const SizedBox(height: 6),
-          _Field(controller: _cardNumber, hint: '•••• •••• •••• ••••', c: c, keyboardType: TextInputType.number),
-          const SizedBox(height: 12),
-          Row(children: [
+          gap,
+          const _FormLabel('Cardholder name'),
+          _Field(controller: _cardholderName, hint: 'Name on card', onSubmit: _submit),
+          gap,
+          const _FormLabel('Card number'),
+          _Field(controller: _cardNumber, hint: '1234 5678 9012 3456', keyboardType: TextInputType.number, onSubmit: _submit),
+          gap,
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              _FormLabel('Expiry (YYYY-MM)', c),
-              const SizedBox(height: 6),
-              _Field(controller: _expirationDate, hint: '2027-12', c: c),
+              const _FormLabel('Expiry'),
+              _Field(controller: _expirationDate, hint: 'YYYY-MM', onSubmit: _submit),
             ])),
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              _FormLabel('CVV', c),
-              const SizedBox(height: 6),
-              _Field(controller: _cvv, hint: '•••', c: c, obscure: true, keyboardType: TextInputType.number),
+              const _FormLabel('CVV'),
+              _Field(controller: _cvv, hint: '•••', obscure: true, keyboardType: TextInputType.number, onSubmit: _submit),
+            ])),
+            const SizedBox(width: 10),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const _FormLabel('PIN', optional: true),
+              _Field(controller: _pin, hint: '••••', obscure: true, keyboardType: TextInputType.number, onSubmit: _submit),
             ])),
           ]),
-          const SizedBox(height: 12),
-          _FormLabel('PIN', c),
-          const SizedBox(height: 6),
-          _Field(controller: _pin, hint: '••••', c: c, obscure: true, keyboardType: TextInputType.number),
-          const SizedBox(height: 12),
-          _FormLabel('Note', c),
-          const SizedBox(height: 6),
-          _Field(controller: _note, hint: 'Optional note', c: c, maxLines: 2),
+          gap,
+          const _FormLabel('Note', optional: true),
+          _Field(controller: _note, hint: 'Optional note', maxLines: 2),
         ];
       default:
         return [
-          const SizedBox(height: 12),
-          Text('Creation for this type is not yet supported.',
-              style: TextStyle(fontSize: 12, color: widget.c.subtle)),
+          gap,
+          Text('Editing this type isn’t supported yet.',
+              style: TextStyle(fontSize: 12, color: c.subtle)),
         ];
     }
   }
 }
 
-// ── Small helpers ─────────────────────────────────────────────────────────────
+// ── Form helpers ────────────────────────────────────────────────────────────
 
 class _FormLabel extends StatelessWidget {
   final String text;
-  final ProtonifyColors c;
-  const _FormLabel(this.text, this.c);
+  final bool optional;
+  const _FormLabel(this.text, {this.optional = false});
 
   @override
   Widget build(BuildContext context) {
-    return Text(text, style: TextStyle(fontSize: 11, color: c.subtle));
+    final c = context.c;
+    return Padding(
+      padding: const EdgeInsets.only(left: 2, bottom: 6),
+      child: Text.rich(TextSpan(children: [
+        TextSpan(text: text, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: c.subtle)),
+        if (optional) TextSpan(text: '  optional', style: TextStyle(fontSize: 11, color: c.faint)),
+      ])),
+    );
   }
 }
 
 class _Field extends StatelessWidget {
   final TextEditingController controller;
   final String hint;
-  final ProtonifyColors c;
   final bool obscure;
   final int maxLines;
+  final bool autofocus;
   final TextInputType? keyboardType;
   final String? Function(String?)? validator;
+  final VoidCallback? onSubmit;
 
   const _Field({
     required this.controller,
     required this.hint,
-    required this.c,
     this.obscure = false,
     this.maxLines = 1,
+    this.autofocus = false,
     this.keyboardType,
     this.validator,
+    this.onSubmit,
   });
 
   @override
   Widget build(BuildContext context) {
+    final c = context.c;
     return TextFormField(
       controller: controller,
       obscureText: obscure,
+      autofocus: autofocus,
+      minLines: maxLines > 1 ? maxLines : null,
       maxLines: obscure ? 1 : maxLines,
-      keyboardType: keyboardType,
+      keyboardType: maxLines > 1 ? TextInputType.multiline : keyboardType,
       validator: validator,
+      onFieldSubmitted: maxLines == 1 && onSubmit != null ? (_) => onSubmit!() : null,
       style: TextStyle(fontSize: 13, color: c.onSurface),
-      decoration: InputDecoration(
-        hintText: hint,
-        hintStyle: TextStyle(fontSize: 13, color: c.subtle),
-        filled: true,
-        fillColor: c.surfaceVariant,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide(color: c.accent.withValues(alpha: 0.6), width: 1),
-        ),
-        errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: Color(0xFFFF375F), width: 1),
-        ),
-        focusedErrorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: Color(0xFFFF375F), width: 1),
-        ),
-        errorStyle: const TextStyle(fontSize: 10),
-      ),
+      decoration: InputDecoration(hintText: hint),
     );
   }
 }
 
-class _VaultDropdown extends StatelessWidget {
-  final List<Vault> vaults;
-  final String? value;
-  final ProtonifyColors c;
-  final void Function(String?) onChanged;
-  const _VaultDropdown({required this.vaults, required this.value, required this.c, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: c.surfaceVariant,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          value: value,
-          isExpanded: true,
-          hint: Text('Select vault', style: TextStyle(fontSize: 13, color: c.subtle)),
-          dropdownColor: c.surfaceVariant,
-          style: TextStyle(fontSize: 13, color: c.onSurface),
-          icon: Icon(Icons.expand_more, size: 16, color: c.subtle),
-          items: vaults.map((v) => DropdownMenuItem(value: v.name, child: Text(v.name))).toList(),
-          onChanged: onChanged,
-        ),
-      ),
-    );
-  }
-}
-
-class _DialogButton extends StatefulWidget {
-  final String label;
-  final ProtonifyColors c;
-  final bool primary;
-  final VoidCallback? onTap;
-  const _DialogButton({required this.label, required this.c, this.primary = false, this.onTap});
-
-  @override
-  State<_DialogButton> createState() => _DialogButtonState();
-}
-
-class _DialogButtonState extends State<_DialogButton> {
-  bool _hovered = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final bg = widget.primary
-        ? (widget.onTap == null ? widget.c.accent.withValues(alpha: 0.4) : widget.c.accent)
-        : Colors.transparent;
-    final border = widget.primary ? BorderSide.none : BorderSide(color: widget.c.subtle.withValues(alpha: 0.3));
-
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 100),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            color: _hovered && widget.onTap != null
-                ? (widget.primary ? widget.c.accent.withValues(alpha: 0.85) : widget.c.surfaceVariant)
-                : bg,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.fromBorderSide(border),
-          ),
-          child: Text(widget.label,
-              style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: widget.primary ? FontWeight.w600 : FontWeight.normal,
-                  color: widget.primary ? Colors.white : widget.c.onSurface)),
-        ),
-      ),
-    );
-  }
-}
-
-// ── OTP badge ─────────────────────────────────────────────────────────────────
+// ── OTP badge ───────────────────────────────────────────────────────────────
 
 int _totpPeriod(String uri) {
   if (!uri.startsWith('otpauth://')) return 30;
@@ -991,8 +1101,7 @@ int _totpPeriod(String uri) {
 
 class _OtpBadge extends StatefulWidget {
   final String uri;
-  final ProtonifyColors c;
-  const _OtpBadge({required this.uri, required this.c});
+  const _OtpBadge({required this.uri});
 
   @override
   State<_OtpBadge> createState() => _OtpBadgeState();
@@ -1001,7 +1110,6 @@ class _OtpBadge extends StatefulWidget {
 class _OtpBadgeState extends State<_OtpBadge> {
   final PassService _svc = PassService();
   String? _code;
-  bool _copied = false;
   Timer? _ticker;
   late int _period;
   int _remaining = 30;
@@ -1045,58 +1153,44 @@ class _OtpBadgeState extends State<_OtpBadge> {
     }
   }
 
-  Future<void> _copy() async {
-    if (_code == null) return;
-    await Clipboard.setData(ClipboardData(text: _code!));
-    if (!mounted) return;
-    setState(() => _copied = true);
-    await Future.delayed(const Duration(seconds: 2));
-    if (mounted) setState(() => _copied = false);
-  }
-
-  String _formatted(String code) {
-    if (code.length == 6) return '${code.substring(0, 3)} ${code.substring(3)}';
-    if (code.length == 8) return '${code.substring(0, 4)} ${code.substring(4)}';
-    return code;
-  }
-
   @override
   Widget build(BuildContext context) {
-    final c = widget.c;
-    if (_code == null) {
-      return const SizedBox(width: 0);
-    }
+    final c = context.c;
+    if (_code == null) return const SizedBox.shrink();
     final progress = _remaining / _period;
-    final ringColor = _remaining <= 5 ? const Color(0xFFFF375F) : c.accent;
+    final ringColor = _remaining <= 5 ? c.danger : c.accent;
 
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: _copy,
-      child: Padding(
-        padding: const EdgeInsets.only(left: 8),
-        child: SizedBox(
-          width: 16,
-          height: 16,
-          child: _copied
-              ? Icon(Icons.check, size: 14, color: const Color(0xFF34C759))
-              : CircularProgressIndicator(
-                  value: progress,
-                  strokeWidth: 2,
-                  backgroundColor: c.surfaceVariant,
-                  valueColor: AlwaysStoppedAnimation(ringColor),
-                ),
+    return Tooltip(
+      message: 'Copy 2FA code',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => copyToClipboard(context, _code!, label: '2FA code', secret: true),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                value: progress,
+                strokeWidth: 2,
+                backgroundColor: c.surfaceVariant,
+                valueColor: AlwaysStoppedAnimation(ringColor),
+              ),
+            ),
+          ),
         ),
       ),
     );
   }
 }
 
-// ── Password field with generator + strength meter ────────────────────────────
+// ── Password field with generator + strength meter ──────────────────────────
 
 class _PasswordFieldWithTools extends StatefulWidget {
   final TextEditingController controller;
-  final ProtonifyColors c;
-  const _PasswordFieldWithTools({required this.controller, required this.c});
+  const _PasswordFieldWithTools({required this.controller});
 
   @override
   State<_PasswordFieldWithTools> createState() => _PasswordFieldWithToolsState();
@@ -1133,6 +1227,10 @@ class _PasswordFieldWithToolsState extends State<_PasswordFieldWithTools> {
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 350), () async {
       final text = widget.controller.text;
+      if (text.isEmpty) {
+        if (mounted) setState(() => _score = null);
+        return;
+      }
       final score = await _svc.scorePassword(text);
       if (mounted) setState(() => _score = score);
     });
@@ -1148,115 +1246,113 @@ class _PasswordFieldWithToolsState extends State<_PasswordFieldWithTools> {
       _removeOverlay();
       return;
     }
+    // Capture the theme here: the overlay lives above the dialog.
+    final theme = Theme.of(context);
     _overlay = OverlayEntry(builder: (ctx) {
-      return Stack(children: [
-        Positioned.fill(
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _removeOverlay,
-            child: Container(color: Colors.transparent),
-          ),
-        ),
-        CompositedTransformFollower(
-          link: _layerLink,
-          showWhenUnlinked: false,
-          targetAnchor: Alignment.topRight,
-          followerAnchor: Alignment.topRight,
-          offset: const Offset(0, 4),
-          child: Material(
-            color: Colors.transparent,
-            child: _GeneratorPopover(
-              c: widget.c,
-              onUse: (pw) {
-                widget.controller.text = pw;
-                widget.controller.selection =
-                    TextSelection.collapsed(offset: pw.length);
-                _removeOverlay();
-              },
+      return Theme(
+        data: theme,
+        child: Stack(children: [
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _removeOverlay,
+              child: Container(color: Colors.transparent),
             ),
           ),
-        ),
-      ]);
+          CompositedTransformFollower(
+            link: _layerLink,
+            showWhenUnlinked: false,
+            targetAnchor: Alignment.bottomRight,
+            followerAnchor: Alignment.topRight,
+            offset: const Offset(0, 6),
+            child: Material(
+              color: Colors.transparent,
+              child: _GeneratorPopover(
+                onUse: (pw) {
+                  widget.controller.text = pw;
+                  widget.controller.selection = TextSelection.collapsed(offset: pw.length);
+                  setState(() => _obscure = false);
+                  _removeOverlay();
+                },
+              ),
+            ),
+          ),
+        ]),
+      );
     });
     Overlay.of(context).insert(_overlay!);
   }
 
-  Color _strengthColor(PasswordStrength s) {
+  Color _strengthColor(ProtonifyColors c, PasswordStrength s) {
     return switch (s) {
-      PasswordStrength.vulnerable => const Color(0xFFFF375F),
-      PasswordStrength.weak => const Color(0xFFFF9500),
-      PasswordStrength.strong => const Color(0xFF34C759),
-      PasswordStrength.unknown => widget.c.subtle,
+      PasswordStrength.vulnerable => c.danger,
+      PasswordStrength.weak => c.warning,
+      PasswordStrength.strong => c.success,
+      PasswordStrength.unknown => c.subtle,
     };
   }
 
   @override
   Widget build(BuildContext context) {
-    final c = widget.c;
+    final c = context.c;
     final score = _score;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         CompositedTransformTarget(
           link: _layerLink,
-          child: Row(children: [
-            Expanded(
-              child: TextFormField(
-                controller: widget.controller,
-                obscureText: _obscure,
-                style: TextStyle(fontSize: 13, color: c.onSurface),
-                decoration: InputDecoration(
-                  hintText: '••••••••',
-                  hintStyle: TextStyle(fontSize: 13, color: c.subtle),
-                  filled: true,
-                  fillColor: c.surfaceVariant,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide.none),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: BorderSide(color: c.accent.withValues(alpha: 0.6), width: 1),
+          child: TextFormField(
+            controller: widget.controller,
+            obscureText: _obscure,
+            style: TextStyle(
+              fontSize: 13,
+              color: c.onSurface,
+              fontFamily: _obscure ? null : 'Menlo',
+            ),
+            decoration: InputDecoration(
+              hintText: 'Password',
+              suffixIconConstraints: const BoxConstraints(minHeight: 30),
+              suffixIcon: Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  AppIconButton(
+                    icon: _obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                    tooltip: _obscure ? 'Show' : 'Hide',
+                    size: 16,
+                    onPressed: () => setState(() => _obscure = !_obscure),
                   ),
-                ),
+                  AppIconButton(
+                    icon: Icons.auto_awesome_outlined,
+                    tooltip: 'Generate password',
+                    size: 16,
+                    active: _overlay != null,
+                    onPressed: _toggleGenerator,
+                  ),
+                ]),
               ),
             ),
-            const SizedBox(width: 6),
-            _IconButton(
-              icon: _obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
-              tooltip: _obscure ? 'Show' : 'Hide',
-              c: c,
-              onTap: () => setState(() => _obscure = !_obscure),
-            ),
-            const SizedBox(width: 4),
-            _IconButton(
-              icon: Icons.auto_awesome_outlined,
-              tooltip: 'Generate',
-              c: c,
-              onTap: _toggleGenerator,
-            ),
-          ]),
+          ),
         ),
-        if (score != null) ...[
-          const SizedBox(height: 6),
+        if (score != null && score.strength != PasswordStrength.unknown) ...[
+          const SizedBox(height: 7),
           Row(children: [
             Expanded(
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(2),
                 child: LinearProgressIndicator(
-                  value: (score.numericScore / 100).clamp(0.0, 1.0),
+                  value: (score.numericScore / 100).clamp(0.05, 1.0),
                   minHeight: 3,
                   backgroundColor: c.surfaceVariant,
-                  valueColor: AlwaysStoppedAnimation(_strengthColor(score.strength)),
+                  valueColor: AlwaysStoppedAnimation(_strengthColor(c, score.strength)),
                 ),
               ),
             ),
             const SizedBox(width: 8),
             Text(score.label,
                 style: TextStyle(
-                    fontSize: 10,
+                    fontSize: 11,
                     fontWeight: FontWeight.w600,
-                    color: _strengthColor(score.strength))),
+                    color: _strengthColor(c, score.strength))),
           ]),
         ],
       ],
@@ -1264,52 +1360,9 @@ class _PasswordFieldWithToolsState extends State<_PasswordFieldWithTools> {
   }
 }
 
-class _IconButton extends StatefulWidget {
-  final IconData icon;
-  final String tooltip;
-  final ProtonifyColors c;
-  final VoidCallback onTap;
-  const _IconButton({
-    required this.icon,
-    required this.tooltip,
-    required this.c,
-    required this.onTap,
-  });
-
-  @override
-  State<_IconButton> createState() => _IconButtonState();
-}
-
-class _IconButtonState extends State<_IconButton> {
-  bool _hovered = false;
-  @override
-  Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: Tooltip(
-        message: widget.tooltip,
-        child: GestureDetector(
-          onTap: widget.onTap,
-          child: Container(
-            padding: const EdgeInsets.all(6),
-            decoration: BoxDecoration(
-              color: _hovered ? widget.c.surfaceVariant : Colors.transparent,
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Icon(widget.icon, size: 16, color: widget.c.subtle),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _GeneratorPopover extends StatefulWidget {
-  final ProtonifyColors c;
   final ValueChanged<String> onUse;
-  const _GeneratorPopover({required this.c, required this.onUse});
+  const _GeneratorPopover({required this.onUse});
 
   @override
   State<_GeneratorPopover> createState() => _GeneratorPopoverState();
@@ -1357,19 +1410,19 @@ class _GeneratorPopoverState extends State<_GeneratorPopover> {
 
   @override
   Widget build(BuildContext context) {
-    final c = widget.c;
+    final c = context.c;
     return Container(
       width: 320,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: c.subtle.withValues(alpha: 0.25)),
+        color: c.elevated,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.border),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.25),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
+            color: Colors.black.withValues(alpha: 0.3),
+            blurRadius: 28,
+            offset: const Offset(0, 10),
           ),
         ],
       ),
@@ -1377,107 +1430,84 @@ class _GeneratorPopoverState extends State<_GeneratorPopover> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Mode toggle
           Container(
             padding: const EdgeInsets.all(2),
             decoration: BoxDecoration(
               color: c.surfaceVariant,
-              borderRadius: BorderRadius.circular(7),
+              borderRadius: BorderRadius.circular(8),
             ),
             child: Row(children: [
-              _ModeTab(label: 'Random', selected: !_isPassphrase, c: c,
+              _ModeTab(label: 'Random', selected: !_isPassphrase,
                   onTap: () { setState(() => _isPassphrase = false); _regenerate(); }),
-              _ModeTab(label: 'Passphrase', selected: _isPassphrase, c: c,
+              _ModeTab(label: 'Passphrase', selected: _isPassphrase,
                   onTap: () { setState(() => _isPassphrase = true); _regenerate(); }),
             ]),
           ),
           const SizedBox(height: 12),
-          // Preview
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            constraints: const BoxConstraints(minHeight: 40),
+            padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
             decoration: BoxDecoration(
-              color: c.surfaceVariant,
-              borderRadius: BorderRadius.circular(7),
+              color: c.surface,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: c.border),
             ),
             child: Row(children: [
               Expanded(
-                child: Text(
-                  _loading ? '…' : _preview,
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontFamily: 'Menlo',
-                      color: c.onSurface),
-                  overflow: TextOverflow.ellipsis,
+                child: SelectableText(
+                  _loading && _preview.isEmpty ? '…' : _preview,
+                  style: TextStyle(fontSize: 12.5, fontFamily: 'Menlo', height: 1.4, color: c.onSurface),
                 ),
               ),
-              const SizedBox(width: 6),
-              GestureDetector(
-                onTap: _loading ? null : _regenerate,
-                child: Icon(Icons.refresh, size: 15, color: c.subtle),
+              AppIconButton(
+                icon: Icons.refresh_rounded,
+                tooltip: 'Regenerate',
+                size: 16,
+                onPressed: _loading ? null : _regenerate,
               ),
             ]),
           ),
           const SizedBox(height: 12),
-          // Options
           if (!_isPassphrase) ...[
             _SettingRow(
               label: 'Length',
               trailing: Text('${_length.round()}',
-                  style: TextStyle(fontSize: 11, color: c.onSurface)),
-              c: c,
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: c.onSurface)),
             ),
-            SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 2,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                overlayShape: SliderComponentShape.noOverlay,
-                activeTrackColor: c.accent,
-                inactiveTrackColor: c.surfaceVariant,
-                thumbColor: c.accent,
-              ),
-              child: Slider(
-                min: 8, max: 64, divisions: 56, value: _length,
-                onChanged: (v) => setState(() => _length = v),
-                onChangeEnd: (_) => _regenerate(),
-              ),
+            Slider(
+              min: 8, max: 64, divisions: 56, value: _length,
+              onChanged: (v) => setState(() => _length = v),
+              onChangeEnd: (_) => _regenerate(),
             ),
-            _CheckRow(label: 'Uppercase (A-Z)', value: _upper, c: c,
+            const SizedBox(height: 4),
+            _CheckRow(label: 'Uppercase (A–Z)', value: _upper,
                 onChanged: (v) { setState(() => _upper = v); _regenerate(); }),
-            _CheckRow(label: 'Numbers (0-9)', value: _numbers, c: c,
+            _CheckRow(label: 'Numbers (0–9)', value: _numbers,
                 onChanged: (v) { setState(() => _numbers = v); _regenerate(); }),
-            _CheckRow(label: 'Symbols (!@#…)', value: _symbols, c: c,
+            _CheckRow(label: 'Symbols (!@#…)', value: _symbols,
                 onChanged: (v) { setState(() => _symbols = v); _regenerate(); }),
           ] else ...[
             _SettingRow(
               label: 'Words',
               trailing: Text('${_words.round()}',
-                  style: TextStyle(fontSize: 11, color: c.onSurface)),
-              c: c,
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: c.onSurface)),
             ),
-            SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 2,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                overlayShape: SliderComponentShape.noOverlay,
-                activeTrackColor: c.accent,
-                inactiveTrackColor: c.surfaceVariant,
-                thumbColor: c.accent,
-              ),
-              child: Slider(
-                min: 3, max: 10, divisions: 7, value: _words,
-                onChanged: (v) => setState(() => _words = v),
-                onChangeEnd: (_) => _regenerate(),
-              ),
+            Slider(
+              min: 3, max: 10, divisions: 7, value: _words,
+              onChanged: (v) => setState(() => _words = v),
+              onChangeEnd: (_) => _regenerate(),
             ),
+            const SizedBox(height: 4),
             _SettingRow(
               label: 'Separator',
               trailing: DropdownButtonHideUnderline(
                 child: DropdownButton<String>(
                   value: _separator,
                   isDense: true,
-                  dropdownColor: c.surface,
-                  style: TextStyle(fontSize: 11, color: c.onSurface),
-                  icon: Icon(Icons.expand_more, size: 14, color: c.subtle),
+                  dropdownColor: c.elevated,
+                  borderRadius: BorderRadius.circular(10),
+                  style: TextStyle(fontSize: 12, color: c.onSurface),
+                  icon: Icon(Icons.expand_more_rounded, size: 16, color: c.subtle),
                   items: const [
                     DropdownMenuItem(value: 'hyphens', child: Text('Hyphens')),
                     DropdownMenuItem(value: 'spaces', child: Text('Spaces')),
@@ -1492,20 +1522,20 @@ class _GeneratorPopoverState extends State<_GeneratorPopover> {
                   },
                 ),
               ),
-              c: c,
             ),
-            _CheckRow(label: 'Include numbers', value: _numbers, c: c,
+            _CheckRow(label: 'Include numbers', value: _numbers,
                 onChanged: (v) { setState(() => _numbers = v); _regenerate(); }),
           ],
-          const SizedBox(height: 10),
-          Align(
-            alignment: Alignment.centerRight,
-            child: _DialogButton(
-              label: 'Use',
-              c: c,
-              primary: true,
-              onTap: _preview.isEmpty ? null : () => widget.onUse(_preview),
-            ),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              AppButton.primary(
+                label: 'Use password',
+                dense: true,
+                onPressed: _preview.isEmpty ? null : () => widget.onUse(_preview),
+              ),
+            ],
           ),
         ],
       ),
@@ -1516,27 +1546,31 @@ class _GeneratorPopoverState extends State<_GeneratorPopover> {
 class _ModeTab extends StatelessWidget {
   final String label;
   final bool selected;
-  final ProtonifyColors c;
   final VoidCallback onTap;
-  const _ModeTab({required this.label, required this.selected, required this.c, required this.onTap});
+  const _ModeTab({required this.label, required this.selected, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
+    final c = context.c;
     return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: selected ? c.surface : Colors.transparent,
-            borderRadius: BorderRadius.circular(5),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: selected ? c.elevated : Colors.transparent,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(label,
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+                    color: selected ? c.onSurface : c.subtle)),
           ),
-          child: Text(label,
-              style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-                  color: c.onSurface)),
         ),
       ),
     );
@@ -1546,15 +1580,15 @@ class _ModeTab extends StatelessWidget {
 class _SettingRow extends StatelessWidget {
   final String label;
   final Widget trailing;
-  final ProtonifyColors c;
-  const _SettingRow({required this.label, required this.trailing, required this.c});
+  const _SettingRow({required this.label, required this.trailing});
 
   @override
   Widget build(BuildContext context) {
+    final c = context.c;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(children: [
-        Expanded(child: Text(label, style: TextStyle(fontSize: 11, color: c.subtle))),
+        Expanded(child: Text(label, style: TextStyle(fontSize: 12, color: c.subtle))),
         trailing,
       ]),
     );
@@ -1564,32 +1598,33 @@ class _SettingRow extends StatelessWidget {
 class _CheckRow extends StatelessWidget {
   final String label;
   final bool value;
-  final ProtonifyColors c;
   final ValueChanged<bool> onChanged;
-  const _CheckRow({required this.label, required this.value, required this.c, required this.onChanged});
+  const _CheckRow({required this.label, required this.value, required this.onChanged});
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () => onChanged(!value),
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: Row(children: [
-          SizedBox(
-            width: 16, height: 16,
-            child: Checkbox(
-              value: value,
-              onChanged: (v) => onChanged(v ?? false),
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              visualDensity: const VisualDensity(horizontal: -4, vertical: -4),
-              activeColor: c.accent,
-              side: BorderSide(color: c.subtle, width: 1),
+    final c = context.c;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () => onChanged(!value),
+        behavior: HitTestBehavior.opaque,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(children: [
+            SizedBox(
+              width: 16, height: 16,
+              child: Checkbox(
+                value: value,
+                onChanged: (v) => onChanged(v ?? false),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: const VisualDensity(horizontal: -4, vertical: -4),
+              ),
             ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(child: Text(label, style: TextStyle(fontSize: 11, color: c.onSurface))),
-        ]),
+            const SizedBox(width: 10),
+            Expanded(child: Text(label, style: TextStyle(fontSize: 12, color: c.onSurface))),
+          ]),
+        ),
       ),
     );
   }

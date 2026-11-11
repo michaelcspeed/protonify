@@ -12,6 +12,11 @@ class MainFlutterWindow: NSWindow {
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 
+    // Small enough for a side-by-side layout, large enough for the
+    // single-pane layout to stay usable. Remember size/position across launches.
+    self.minSize = NSSize(width: 420, height: 460)
+    self.setFrameAutosaveName("ProtonifyMainWindow")
+
     self.titlebarAppearsTransparent = true
     self.titleVisibility = .hidden
     self.styleMask.insert(.fullSizeContentView)

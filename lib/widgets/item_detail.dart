@@ -1,291 +1,440 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../app_state.dart';
-import '../main.dart';
 import '../models.dart';
 import '../pass_service.dart';
+import '../theme.dart';
 import 'item_list.dart';
+import 'ui.dart';
 
 class ItemDetailPane extends ConsumerWidget {
-  const ItemDetailPane({super.key});
+  /// Leave room for traffic lights (single-pane layout).
+  final bool leadingInset;
+
+  /// Shows a back button (single-pane layout).
+  final VoidCallback? onBack;
+
+  const ItemDetailPane({super.key, this.leadingInset = false, this.onBack});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final c = Theme.of(context).extension<ProtonifyColors>()!;
-    final state = ref.watch(appStateProvider);
-    final item = state.selectedItem;
+    final c = context.c;
+    final item = ref.watch(appStateProvider.select((s) => s.selectedItem));
 
-    if (item == null) {
-      return Container(
-        color: c.background,
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.shield_outlined, size: 48, color: c.subtle),
-              const SizedBox(height: 12),
-              Text('Select an item',
-                  style: TextStyle(color: c.subtle, fontSize: 13)),
-            ],
-          ),
-        ),
-      );
-    }
-
-    return Container(
+    return Material(
       color: c.background,
-      child: _ItemDetail(item: item, c: c),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          PaneHeader(
+            border: item != null,
+            padding: EdgeInsets.only(left: leadingInset ? kTrafficLightInset : 12, right: 12),
+            child: Row(
+              children: [
+                if (onBack != null)
+                  AppIconButton(icon: Icons.arrow_back_rounded, tooltip: 'Back  esc', onPressed: onBack),
+                const Spacer(),
+                if (item != null) _HeaderActions(item: item),
+              ],
+            ),
+          ),
+          Expanded(
+            child: item == null
+                ? const _NoSelection()
+                : _ItemDetail(key: ValueKey(item.id), item: item),
+          ),
+        ],
+      ),
     );
   }
 }
 
-class _ItemDetail extends StatelessWidget {
-  final PassItem item;
-  final ProtonifyColors c;
-  const _ItemDetail({required this.item, required this.c});
+class _NoSelection extends StatelessWidget {
+  const _NoSelection();
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(28, 64, 28, 28),
-      children: [
-        _Header(item: item, c: c),
-        const SizedBox(height: 24),
-        if (item.type == ItemType.login && item.login != null)
-          _LoginFields(login: item.login!, c: c),
-        if (item.type == ItemType.creditCard && item.creditCard != null)
-          _CreditCardFields(card: item.creditCard!, c: c),
-        if (item.type == ItemType.identity && item.identity != null)
-          _IdentityFields(identity: item.identity!, c: c),
-        if (item.type == ItemType.wifi && item.wifi != null)
-          _WifiFields(wifi: item.wifi!, c: c),
-        if (item.note.isNotEmpty) ...[
-          _SectionLabel('Notes', c),
+    final c = context.c;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: c.accentSoft,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Icon(Icons.shield_outlined, size: 26, color: c.accentText),
+          ),
+          const SizedBox(height: 14),
+          Text('No item selected',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: c.onSurface)),
           const SizedBox(height: 6),
-          _NoteCard(note: item.note, c: c),
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 6,
+            children: [
+              Text('Pick one from the list, or press', style: TextStyle(fontSize: 12.5, color: c.subtle)),
+              const KeyHint('⌘N'),
+              Text('to add one.', style: TextStyle(fontSize: 12.5, color: c.subtle)),
+            ],
+          ),
         ],
-        if (item.extraFields.isNotEmpty) ...[
-          _SectionLabel('Custom Fields', c),
-          const SizedBox(height: 6),
-          ...item.extraFields.map((f) => f.type == ExtraFieldType.totp
-              ? _OtpFieldRow(label: f.name, uri: f.value, c: c)
-              : _FieldRow(label: f.name, value: f.value, c: c)),
-        ],
-        const SizedBox(height: 24),
-        _MetaRow('Created', _formatDate(item.createTime), c),
-        _MetaRow('Modified', _formatDate(item.modifyTime), c),
-      ],
+      ),
     );
   }
-
-  String _formatDate(DateTime d) {
-    return '${d.day} ${_month(d.month)} ${d.year}';
-  }
-
-  String _month(int m) => const [
-        '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
-      ][m];
 }
 
-class _Header extends ConsumerWidget {
+// ── Header actions ──────────────────────────────────────────────────────────
+
+String? _launchableUrl(PassItem item) {
+  final raw = item.displayUrl.trim();
+  if (raw.isEmpty) return null;
+  return raw.contains('://') ? raw : 'https://$raw';
+}
+
+Future<void> _openUrl(BuildContext context, String url) async {
+  final ok = await launchUrl(Uri.parse(url)).catchError((_) => false);
+  if (!ok && context.mounted) showToast(context, 'Couldn’t open $url', error: true);
+}
+
+class _HeaderActions extends ConsumerWidget {
   final PassItem item;
-  final ProtonifyColors c;
-  const _Header({required this.item, required this.c});
+  const _HeaderActions({required this.item});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.c;
+    final url = _launchableUrl(item);
+    final narrow = MediaQuery.sizeOf(context).width < 420;
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Container(
-          width: 48,
-          height: 48,
-          decoration: BoxDecoration(
-            color: _iconColor(item.type),
-            borderRadius: BorderRadius.circular(12),
+        if (url != null) ...[
+          AppIconButton(
+            icon: Icons.open_in_new_rounded,
+            tooltip: 'Open website',
+            size: 17,
+            onPressed: () => _openUrl(context, url),
           ),
-          child: Icon(_iconData(item.type), size: 24, color: Colors.white),
-        ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(item.title,
-                  style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                      color: c.onSurface)),
-              if (item.displayUrl.isNotEmpty)
-                Text(item.displayUrl,
-                    style: TextStyle(fontSize: 12, color: c.subtle),
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 1),
-            ],
-          ),
-        ),
-        IconButton(
-          icon: Icon(Icons.edit_outlined, size: 17, color: c.subtle),
-          tooltip: 'Edit',
-          onPressed: () => showDialog(
-            context: context,
-            builder: (_) => NewItemDialog(editItem: item),
-          ),
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-        ),
+          const SizedBox(width: 4),
+        ],
+        if (narrow)
+          AppIconButton(
+            icon: Icons.edit_outlined,
+            tooltip: 'Edit',
+            size: 17,
+            onPressed: () => _edit(context),
+          )
+        else
+          AppButton(label: 'Edit', icon: Icons.edit_outlined, dense: true, onPressed: () => _edit(context)),
         const SizedBox(width: 4),
-        IconButton(
-          icon: Icon(Icons.folder_outlined, size: 17, color: c.subtle),
-          tooltip: 'Move to folder',
-          onPressed: () => _showFolderPicker(context, ref),
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-        ),
-        const SizedBox(width: 4),
-        IconButton(
-          icon: Icon(Icons.delete_outline, size: 18, color: c.subtle),
-          tooltip: 'Move to Trash',
-          onPressed: () => _confirmTrash(context, ref),
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+        Builder(
+          builder: (btnContext) => AppIconButton(
+            icon: Icons.more_horiz_rounded,
+            tooltip: 'More',
+            onPressed: () async {
+              final box = btnContext.findRenderObject() as RenderBox;
+              final pos = box.localToGlobal(Offset(0, box.size.height + 4));
+              final v = await showMenu<String>(
+                context: context,
+                position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx + box.size.width, pos.dy),
+                items: [
+                  _menuItem('move', Icons.drive_file_move_outline, 'Move to folder…', c.onSurface),
+                  _menuItem('trash', Icons.delete_outline_rounded, 'Move to trash…', c.danger),
+                ],
+              );
+              if (!context.mounted) return;
+              if (v == 'move') _showFolderPicker(context, ref, item);
+              if (v == 'trash') _confirmTrash(context, ref, item);
+            },
+          ),
         ),
       ],
     );
   }
 
-  Future<void> _showFolderPicker(BuildContext context, WidgetRef ref) async {
-    final c = Theme.of(context).extension<ProtonifyColors>()!;
-    final state = ref.read(appStateProvider);
-    // Only folders in the same vault as this item are valid destinations.
-    final folders =
-        state.folders.where((f) => f.shareId == item.shareId).toList();
+  PopupMenuItem<String> _menuItem(String value, IconData icon, String label, Color color) =>
+      PopupMenuItem(
+        value: value,
+        height: 36,
+        child: Row(children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 10),
+          Text(label, style: TextStyle(fontSize: 13, color: color)),
+        ]),
+      );
 
-    final choice = await showDialog<_FolderChoice>(
-      context: context,
-      builder: (ctx) => Dialog(
-        backgroundColor: c.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        child: Container(
-          width: 320,
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(6, 2, 6, 10),
-                child: Text('Move to folder',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: c.onSurface)),
-              ),
-              _FolderChoiceTile(
-                label: '(No folder)',
-                icon: Icons.inbox_outlined,
-                selected: item.folderId == null,
-                c: c,
-                onTap: () => Navigator.of(ctx).pop(const _FolderChoice.none()),
-              ),
-              if (folders.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Text('No folders in this vault.',
-                      style: TextStyle(fontSize: 12, color: c.subtle)),
-                )
-              else
-                for (final f in folders)
-                  _FolderChoiceTile(
-                    label: f.name,
-                    icon: Icons.folder_outlined,
-                    selected: item.folderId == f.id,
-                    c: c,
-                    onTap: () => Navigator.of(ctx).pop(_FolderChoice(f.id)),
-                  ),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(),
-                  child: Text('Cancel', style: TextStyle(color: c.onSurface)),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    if (choice == null) return;
-    if (choice.folderId == item.folderId) return;
-    try {
-      await ref
-          .read(appStateProvider.notifier)
-          .moveItemToFolder(item: item, folderId: choice.folderId);
-    } catch (_) {
-      // silent — UI will reflect no change
-    }
-  }
-
-  Future<void> _confirmTrash(BuildContext context, WidgetRef ref) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1C1C1E),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        title: const Text('Move to Trash?',
-            style: TextStyle(color: Colors.white, fontSize: 16)),
-        content: Text(
-          '"${item.title}" will be moved to the trash. You can restore it later.',
-          style: const TextStyle(color: Color(0xFFAEAEB2), fontSize: 13),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel',
-                style: TextStyle(color: Color(0xFF6D4AFF))),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Move to Trash',
-                style: TextStyle(color: Color(0xFFFF3B30))),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true && context.mounted) {
-      await ref.read(appStateProvider.notifier).trashItem(item);
-    }
-  }
-
-  Color _iconColor(ItemType t) => switch (t) {
-        ItemType.login => const Color(0xFF4A6FFF),
-        ItemType.note => const Color(0xFFFF9500),
-        ItemType.creditCard => const Color(0xFF34C759),
-        ItemType.identity => const Color(0xFFFF375F),
-        ItemType.alias => const Color(0xFF5AC8FA),
-        ItemType.wifi => const Color(0xFF32ADE6),
-        _ => const Color(0xFF6D4AFF),
-      };
-
-  IconData _iconData(ItemType t) => switch (t) {
-        ItemType.login => Icons.language,
-        ItemType.note => Icons.notes,
-        ItemType.creditCard => Icons.credit_card,
-        ItemType.identity => Icons.person_outline,
-        ItemType.alias => Icons.alternate_email,
-        ItemType.wifi => Icons.wifi,
-        _ => Icons.key_outlined,
-      };
+  void _edit(BuildContext context) =>
+      showDialog(context: context, builder: (_) => NewItemDialog(editItem: item));
 }
 
-class _WifiFields extends StatelessWidget {
-  final WifiContent wifi;
-  final ProtonifyColors c;
-  const _WifiFields({required this.wifi, required this.c});
+Future<void> _showFolderPicker(BuildContext context, WidgetRef ref, PassItem item) async {
+  final state = ref.read(appStateProvider);
+  // Only folders in the same vault as this item are valid destinations.
+  final folders = state.folders.where((f) => f.shareId == item.shareId).toList();
 
-  String _securityLabel(String s) => switch (s) {
+  final choice = await showDialog<_FolderChoice>(
+    context: context,
+    builder: (ctx) => AppDialog(
+      title: 'Move to folder',
+      width: 340,
+      actions: [AppButton(label: 'Cancel', onPressed: () => Navigator.of(ctx).pop())],
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(ctx).height * 0.5),
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            _FolderChoiceTile(
+              label: 'No folder',
+              icon: Icons.inbox_outlined,
+              selected: item.folderId == null,
+              onTap: () => Navigator.of(ctx).pop(const _FolderChoice.none()),
+            ),
+            for (final f in folders)
+              _FolderChoiceTile(
+                label: f.name,
+                icon: Icons.folder_outlined,
+                selected: item.folderId == f.id,
+                onTap: () => Navigator.of(ctx).pop(_FolderChoice(f.id)),
+              ),
+            if (folders.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+                child: Text('This vault has no folders yet. Create one from the sidebar.',
+                    style: TextStyle(fontSize: 12, color: ctx.c.subtle)),
+              ),
+          ],
+        ),
+      ),
+    ),
+  );
+  if (choice == null || choice.folderId == item.folderId || !context.mounted) return;
+  final toastCtx = Navigator.of(context).context;
+  try {
+    await ref.read(appStateProvider.notifier).moveItemToFolder(item: item, folderId: choice.folderId);
+    if (toastCtx.mounted) {
+      final name = choice.folderId == null
+          ? null
+          : folders.firstWhere((f) => f.id == choice.folderId).name;
+      showToast(toastCtx, name == null ? 'Removed from folder' : 'Moved to $name');
+    }
+  } catch (e) {
+    if (toastCtx.mounted) showToast(toastCtx, friendlyError(e), error: true);
+  }
+}
+
+Future<void> _confirmTrash(BuildContext context, WidgetRef ref, PassItem item) async {
+  final ok = await confirm(
+    context,
+    title: 'Move “${item.title}” to trash?',
+    message: 'You can restore it from the trash in Proton Pass.',
+    confirmLabel: 'Move to trash',
+    destructive: true,
+  );
+  if (!ok || !context.mounted) return;
+  final notifier = ref.read(appStateProvider.notifier);
+  // This widget disappears once the item is gone; toast from the navigator.
+  final toastCtx = Navigator.of(context).context;
+  try {
+    await notifier.trashItem(item);
+    if (toastCtx.mounted) {
+      showToast(
+        toastCtx,
+        '“${item.title}” moved to trash',
+        icon: Icons.delete_outline_rounded,
+        actionLabel: 'Undo',
+        onAction: () => notifier.untrashItem(item).catchError((_) {}),
+      );
+    }
+  } catch (e) {
+    if (toastCtx.mounted) showToast(toastCtx, friendlyError(e), error: true);
+  }
+}
+
+// ── Detail body ─────────────────────────────────────────────────────────────
+
+class _ItemDetail extends ConsumerWidget {
+  final PassItem item;
+  const _ItemDetail({super.key, required this.item});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.c;
+    final state = ref.watch(appStateProvider);
+    final kind = kindOf(item.type);
+
+    final vault = state.vaults.where((v) => v.shareId == item.shareId).firstOrNull;
+    final folder = item.folderId == null
+        ? null
+        : state.folders.where((f) => f.id == item.folderId).firstOrNull;
+    final crumbs = [kind.label, if (vault != null) vault.name, if (folder != null) folder.name];
+
+    return LayoutBuilder(builder: (context, box) {
+      final hPad = box.maxWidth < 480 ? 16.0 : 32.0;
+      return Scrollbar(
+        child: SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(hPad, 24, hPad, 32),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 640),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      KindChip(kind: kind, size: 44),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              item.title.isEmpty ? 'Untitled' : item.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: -0.2,
+                                color: c.onSurface,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(crumbs.join('  ·  '),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(fontSize: 12, color: c.subtle)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                  ..._sections(context),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Created ${_formatDate(item.createTime)}  ·  Modified ${_formatDate(item.modifyTime)}',
+                    style: TextStyle(fontSize: 11.5, color: c.faint),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    });
+  }
+
+  List<Widget> _sections(BuildContext context) {
+    final out = <Widget>[];
+    void section(String? title, List<Widget> rows) {
+      if (rows.isEmpty) return;
+      out.add(_Section(title: title, children: rows));
+    }
+
+    switch (item.type) {
+      case ItemType.login:
+        final l = item.login;
+        if (l != null) {
+          section(null, [
+            if (l.email.isNotEmpty) _FieldRow(label: 'Email', value: l.email),
+            if (l.username.isNotEmpty) _FieldRow(label: 'Username', value: l.username),
+            if (l.password.isNotEmpty) _FieldRow(label: 'Password', value: l.password, secret: true, mono: true),
+            if (l.totpUri.isNotEmpty) _OtpFieldRow(label: '2FA code', uri: l.totpUri),
+            if (l.urls.length == 1) _FieldRow(label: 'Website', value: l.urls.first, link: true),
+          ]);
+          if (l.urls.length > 1) {
+            section('Websites', [
+              for (final u in l.urls) _FieldRow(label: 'Website', value: u, link: true),
+            ]);
+          }
+        }
+      case ItemType.creditCard:
+        final card = item.creditCard;
+        if (card != null) {
+          section(null, [
+            if (card.cardholderName.isNotEmpty) _FieldRow(label: 'Cardholder', value: card.cardholderName),
+            if (card.number.isNotEmpty)
+              _FieldRow(label: 'Card number', value: card.number, secret: true, mono: true,
+                  masked: _maskCard(card.number)),
+            if (card.expirationDate.isNotEmpty) _FieldRow(label: 'Expires', value: card.expirationDate),
+            if (card.verificationNumber.isNotEmpty)
+              _FieldRow(label: 'Security code', value: card.verificationNumber, secret: true, mono: true),
+            if (card.pin.isNotEmpty) _FieldRow(label: 'PIN', value: card.pin, secret: true, mono: true),
+          ]);
+        }
+      case ItemType.wifi:
+        final w = item.wifi;
+        if (w != null) {
+          section(null, [
+            _FieldRow(label: 'Network name', value: w.ssid),
+            if (w.password.isNotEmpty) _FieldRow(label: 'Password', value: w.password, secret: true, mono: true),
+            if (w.security.isNotEmpty) _FieldRow(label: 'Security', value: _securityLabel(w.security), copyable: false),
+          ]);
+        }
+      case ItemType.identity:
+        final id = item.identity;
+        if (id != null) {
+          section('Personal', [
+            if (id.fullName.isNotEmpty) _FieldRow(label: 'Full name', value: id.fullName),
+            if (id.email.isNotEmpty) _FieldRow(label: 'Email', value: id.email),
+            if (id.phoneNumber.isNotEmpty) _FieldRow(label: 'Phone', value: id.phoneNumber),
+            if (id.birthdate.isNotEmpty) _FieldRow(label: 'Birthdate', value: id.birthdate),
+            if (id.gender.isNotEmpty) _FieldRow(label: 'Gender', value: id.gender),
+            ...id.extraPersonalDetails.map(_extra),
+          ]);
+          section('Address', [
+            if (id.streetAddress.isNotEmpty) _FieldRow(label: 'Street', value: id.streetAddress),
+            if (id.city.isNotEmpty) _FieldRow(label: 'City', value: id.city),
+            if (id.zipOrPostalCode.isNotEmpty) _FieldRow(label: 'Postal code', value: id.zipOrPostalCode),
+            if (id.stateOrProvince.isNotEmpty) _FieldRow(label: 'State / province', value: id.stateOrProvince),
+            if (id.countryOrRegion.isNotEmpty) _FieldRow(label: 'Country', value: id.countryOrRegion),
+            ...id.extraAddressDetails.map(_extra),
+          ]);
+          section('Documents', [
+            if (id.passportNumber.isNotEmpty) _FieldRow(label: 'Passport', value: id.passportNumber, secret: true),
+            if (id.licenseNumber.isNotEmpty) _FieldRow(label: 'Driving licence', value: id.licenseNumber, secret: true),
+            if (id.socialSecurityNumber.isNotEmpty)
+              _FieldRow(label: 'Social security number', value: id.socialSecurityNumber, secret: true),
+          ]);
+          section('Work', [
+            if (id.organization.isNotEmpty) _FieldRow(label: 'Organization', value: id.organization),
+            if (id.jobTitle.isNotEmpty) _FieldRow(label: 'Job title', value: id.jobTitle),
+            if (id.workEmail.isNotEmpty) _FieldRow(label: 'Work email', value: id.workEmail),
+            ...id.extraWorkDetails.map(_extra),
+          ]);
+          section('Contact', id.extraContactDetails.map(_extra).toList());
+        }
+      default:
+        break;
+    }
+
+    if (item.note.isNotEmpty) {
+      out.add(_Section(
+        title: item.type == ItemType.note ? null : 'Note',
+        children: [_NoteBody(note: item.note)],
+      ));
+    }
+    section('Custom fields', item.extraFields.map(_extra).toList());
+    return out;
+  }
+
+  Widget _extra(ExtraField f) => f.type == ExtraFieldType.totp
+      ? _OtpFieldRow(label: f.name, uri: f.value)
+      : _FieldRow(label: f.name, value: f.value, secret: f.type == ExtraFieldType.hidden);
+
+  static String _maskCard(String n) {
+    final digits = n.replaceAll(' ', '');
+    return digits.length >= 4 ? '••••  ••••  ••••  ${digits.substring(digits.length - 4)}' : '••••';
+  }
+
+  static String _securityLabel(String s) => switch (s) {
         'wpa3' => 'WPA3',
         'wpa2' => 'WPA2',
         'wpa' => 'WPA',
@@ -295,349 +444,162 @@ class _WifiFields extends StatelessWidget {
         _ => s.toUpperCase(),
       };
 
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionLabel('Network', c),
-        const SizedBox(height: 6),
-        _FieldRow(label: 'SSID', value: wifi.ssid, c: c),
-        if (wifi.password.isNotEmpty) _PasswordRow(password: wifi.password, c: c),
-        if (wifi.security.isNotEmpty)
-          _FieldRow(label: 'Security', value: _securityLabel(wifi.security), c: c),
-        const SizedBox(height: 16),
-      ],
-    );
-  }
+  static String _formatDate(DateTime d) =>
+      '${d.day} ${const ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.month]} ${d.year}';
 }
 
-class _LoginFields extends StatelessWidget {
-  final LoginContent login;
-  final ProtonifyColors c;
-  const _LoginFields({required this.login, required this.c});
+/// A titled card of rows separated by hairlines.
+class _Section extends StatelessWidget {
+  final String? title;
+  final List<Widget> children;
+  const _Section({this.title, required this.children});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionLabel('Login Details', c),
-        const SizedBox(height: 6),
-        if (login.email.isNotEmpty)
-          _FieldRow(label: 'Email / Username', value: login.email, c: c),
-        if (login.username.isNotEmpty)
-          _FieldRow(label: 'Username', value: login.username, c: c),
-        _PasswordRow(password: login.password, c: c),
-        if (login.urls.isNotEmpty)
-          _FieldRow(label: 'Website', value: login.urls.first, c: c),
-        if (login.totpUri.isNotEmpty)
-          _OtpFieldRow(label: '2FA token', uri: login.totpUri, c: c),
-      ],
-    );
-  }
-}
-
-class _CreditCardFields extends StatelessWidget {
-  final CreditCardContent card;
-  final ProtonifyColors c;
-  const _CreditCardFields({required this.card, required this.c});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionLabel('Card Details', c),
-        const SizedBox(height: 6),
-        if (card.cardholderName.isNotEmpty)
-          _FieldRow(label: 'Cardholder', value: card.cardholderName, c: c),
-        if (card.number.isNotEmpty)
-          _FieldRow(label: 'Card Number', value: card.number, c: c),
-        if (card.expirationDate.isNotEmpty)
-          _FieldRow(label: 'Expiry', value: card.expirationDate, c: c),
-        if (card.verificationNumber.isNotEmpty)
-          _FieldRow(label: 'CVV', value: card.verificationNumber, c: c),
-        if (card.pin.isNotEmpty)
-          _FieldRow(label: 'PIN', value: card.pin, c: c),
-      ],
-    );
-  }
-}
-
-class _IdentityFields extends StatelessWidget {
-  final IdentityContent identity;
-  final ProtonifyColors c;
-  const _IdentityFields({required this.identity, required this.c});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionLabel('Personal', c),
-        const SizedBox(height: 6),
-        if (identity.fullName.isNotEmpty)
-          _FieldRow(label: 'Full Name', value: identity.fullName, c: c),
-        if (identity.email.isNotEmpty)
-          _FieldRow(label: 'Email', value: identity.email, c: c),
-        if (identity.phoneNumber.isNotEmpty)
-          _FieldRow(label: 'Phone', value: identity.phoneNumber, c: c),
-        if (identity.birthdate.isNotEmpty)
-          _FieldRow(label: 'Birthdate', value: identity.birthdate, c: c),
-        if (identity.gender.isNotEmpty)
-          _FieldRow(label: 'Gender', value: identity.gender, c: c),
-        ...identity.extraPersonalDetails.map((f) => _FieldRow(label: f.name, value: f.value, c: c)),
-        if (_hasAddress(identity)) ...[
-          _SectionLabel('Address', c),
-          const SizedBox(height: 6),
-          if (identity.streetAddress.isNotEmpty)
-            _FieldRow(label: 'Street', value: identity.streetAddress, c: c),
-          if (identity.city.isNotEmpty)
-            _FieldRow(label: 'City', value: identity.city, c: c),
-          if (identity.zipOrPostalCode.isNotEmpty)
-            _FieldRow(label: 'Postal Code', value: identity.zipOrPostalCode, c: c),
-          if (identity.stateOrProvince.isNotEmpty)
-            _FieldRow(label: 'State / Province', value: identity.stateOrProvince, c: c),
-          if (identity.countryOrRegion.isNotEmpty)
-            _FieldRow(label: 'Country', value: identity.countryOrRegion, c: c),
-          ...identity.extraAddressDetails.map((f) => _FieldRow(label: f.name, value: f.value, c: c)),
-        ],
-        if (_hasId(identity)) ...[
-          _SectionLabel('IDs', c),
-          const SizedBox(height: 6),
-          if (identity.passportNumber.isNotEmpty)
-            _FieldRow(label: 'Passport', value: identity.passportNumber, c: c),
-          if (identity.licenseNumber.isNotEmpty)
-            _FieldRow(label: 'License', value: identity.licenseNumber, c: c),
-          if (identity.socialSecurityNumber.isNotEmpty)
-            _FieldRow(label: 'SSN', value: identity.socialSecurityNumber, c: c),
-        ],
-        if (_hasWork(identity)) ...[
-          _SectionLabel('Work', c),
-          const SizedBox(height: 6),
-          if (identity.organization.isNotEmpty)
-            _FieldRow(label: 'Organization', value: identity.organization, c: c),
-          if (identity.jobTitle.isNotEmpty)
-            _FieldRow(label: 'Job Title', value: identity.jobTitle, c: c),
-          if (identity.workEmail.isNotEmpty)
-            _FieldRow(label: 'Work Email', value: identity.workEmail, c: c),
-          ...identity.extraWorkDetails.map((f) => _FieldRow(label: f.name, value: f.value, c: c)),
-        ],
-        if (identity.extraContactDetails.isNotEmpty) ...[
-          _SectionLabel('Contact Details', c),
-          const SizedBox(height: 6),
-          ...identity.extraContactDetails.map((f) => _FieldRow(label: f.name, value: f.value, c: c)),
-        ],
-      ],
-    );
-  }
-
-  bool _hasAddress(IdentityContent id) =>
-      id.streetAddress.isNotEmpty || id.city.isNotEmpty ||
-      id.countryOrRegion.isNotEmpty || id.extraAddressDetails.isNotEmpty;
-
-  bool _hasId(IdentityContent id) =>
-      id.passportNumber.isNotEmpty || id.licenseNumber.isNotEmpty ||
-      id.socialSecurityNumber.isNotEmpty;
-
-  bool _hasWork(IdentityContent id) =>
-      id.organization.isNotEmpty || id.jobTitle.isNotEmpty ||
-      id.workEmail.isNotEmpty || id.extraWorkDetails.isNotEmpty;
-}
-
-class _SectionLabel extends StatelessWidget {
-  final String text;
-  final ProtonifyColors c;
-  const _SectionLabel(this.text, this.c);
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(text.toUpperCase(),
-        style: TextStyle(
-            fontSize: 10,
-            letterSpacing: 1.2,
-            fontWeight: FontWeight.w600,
-            color: c.subtle));
-  }
-}
-
-class _FieldRow extends StatelessWidget {
-  final String label;
-  final String value;
-  final ProtonifyColors c;
-  final bool obscure;
-  const _FieldRow(
-      {required this.label,
-      required this.value,
-      required this.c,
-      this.obscure = false});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
+    final c = context.c;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Expanded(
+          if (title != null) SectionLabel(title!),
+          Container(
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: c.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: c.border),
+            ),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(label,
-                    style: TextStyle(fontSize: 10, color: c.subtle)),
-                const SizedBox(height: 2),
-                Text(value,
-                    style: TextStyle(
-                        fontSize: 13, color: c.onSurface)),
+                for (var i = 0; i < children.length; i++) ...[
+                  if (i > 0) Divider(height: 1, thickness: 1, color: c.border, indent: 14),
+                  children[i],
+                ],
               ],
             ),
           ),
-          _CopyButton(value: value, c: c),
         ],
       ),
     );
   }
 }
 
-class _PasswordRow extends StatefulWidget {
-  final String password;
-  final ProtonifyColors c;
-  const _PasswordRow({required this.password, required this.c});
+/// One field. Click anywhere on the row to copy; secrets are masked until
+/// revealed and auto-clear from the clipboard.
+class _FieldRow extends StatefulWidget {
+  final String label;
+  final String value;
+  final bool secret;
+  final bool mono;
+  final bool link;
+  final bool copyable;
+  final String? masked;
+  const _FieldRow({
+    required this.label,
+    required this.value,
+    this.secret = false,
+    this.mono = false,
+    this.link = false,
+    this.copyable = true,
+    this.masked,
+  });
 
   @override
-  State<_PasswordRow> createState() => _PasswordRowState();
+  State<_FieldRow> createState() => _FieldRowState();
 }
 
-class _PasswordRowState extends State<_PasswordRow> {
-  bool _visible = false;
+class _FieldRowState extends State<_FieldRow> {
+  bool _revealed = false;
+
+  void _copy() => copyToClipboard(context, widget.value, label: widget.label, secret: widget.secret);
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: widget.c.surface,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Password',
-                    style: TextStyle(fontSize: 10, color: widget.c.subtle)),
-                const SizedBox(height: 2),
-                Text(
-                  _visible ? widget.password : '•' * widget.password.length.clamp(8, 16),
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: widget.c.onSurface,
-                    letterSpacing: _visible ? 0 : 2,
-                    fontFamily: _visible ? null : 'monospace',
+    final c = context.c;
+    final hidden = widget.secret && !_revealed;
+    final shown = hidden ? (widget.masked ?? '•' * widget.value.length.clamp(8, 14)) : widget.value;
+
+    return HoverBuilder(
+      cursor: widget.copyable ? SystemMouseCursors.click : MouseCursor.defer,
+      builder: (context, hovered) => GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.copyable ? _copy : null,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 90),
+          color: hovered && widget.copyable ? c.surfaceVariant.withValues(alpha: 0.45) : Colors.transparent,
+          padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(widget.label, style: TextStyle(fontSize: 11.5, color: c.subtle)),
+                    const SizedBox(height: 3),
+                    Text(
+                      shown,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        height: 1.3,
+                        color: widget.link ? c.accentText : c.onSurface,
+                        fontFamily: widget.mono && !hidden ? 'Menlo' : null,
+                        letterSpacing: hidden ? 1.5 : 0,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (widget.secret)
+                AppIconButton(
+                  icon: _revealed ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+                  tooltip: _revealed ? 'Hide' : 'Reveal',
+                  size: 16,
+                  onPressed: () => setState(() => _revealed = !_revealed),
+                ),
+              if (widget.link)
+                AppIconButton(
+                  icon: Icons.open_in_new_rounded,
+                  tooltip: 'Open',
+                  size: 16,
+                  onPressed: () => _openUrl(
+                      context, widget.value.contains('://') ? widget.value : 'https://${widget.value}'),
+                ),
+              if (widget.copyable)
+                AnimatedOpacity(
+                  duration: const Duration(milliseconds: 100),
+                  opacity: hovered ? 1 : 0.55,
+                  child: AppIconButton(
+                    icon: Icons.content_copy_rounded,
+                    tooltip: 'Copy',
+                    size: 15,
+                    onPressed: _copy,
                   ),
                 ),
-              ],
-            ),
+            ],
           ),
-          IconButton(
-            icon: Icon(
-              _visible ? Icons.visibility_off_outlined : Icons.visibility_outlined,
-              size: 16,
-              color: widget.c.subtle,
-            ),
-            onPressed: () => setState(() => _visible = !_visible),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-          ),
-          _CopyButton(value: widget.password, c: widget.c),
-        ],
+        ),
       ),
     );
   }
 }
 
-class _CopyButton extends StatefulWidget {
-  final String value;
-  final ProtonifyColors c;
-  const _CopyButton({required this.value, required this.c});
-
-  @override
-  State<_CopyButton> createState() => _CopyButtonState();
-}
-
-class _CopyButtonState extends State<_CopyButton> {
-  bool _copied = false;
-
-  Future<void> _copy() async {
-    await Clipboard.setData(ClipboardData(text: widget.value));
-    setState(() => _copied = true);
-    await Future.delayed(const Duration(seconds: 2));
-    if (mounted) setState(() => _copied = false);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return IconButton(
-      icon: Icon(
-        _copied ? Icons.check : Icons.copy_outlined,
-        size: 15,
-        color: _copied ? const Color(0xFF34C759) : widget.c.subtle,
-      ),
-      onPressed: _copy,
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-    );
-  }
-}
-
-class _NoteCard extends StatelessWidget {
+class _NoteBody extends StatelessWidget {
   final String note;
-  final ProtonifyColors c;
-  const _NoteCard({required this.note, required this.c});
+  const _NoteBody({required this.note});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Text(note,
-          style: TextStyle(fontSize: 13, color: c.onSurface)),
-    );
-  }
-}
-
-class _MetaRow extends StatelessWidget {
-  final String label;
-  final String value;
-  final ProtonifyColors c;
-  const _MetaRow(this.label, this.value, this.c);
-
-  @override
-  Widget build(BuildContext context) {
+    final c = context.c;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Row(
-        children: [
-          Text(label, style: TextStyle(fontSize: 11, color: c.subtle)),
-          const SizedBox(width: 8),
-          Text(value,
-              style: TextStyle(fontSize: 11, color: c.subtle)),
-        ],
-      ),
+      padding: const EdgeInsets.all(14),
+      child: SelectableText(note, style: TextStyle(fontSize: 13.5, height: 1.5, color: c.onSurface)),
     );
   }
 }
+
+// ── TOTP ────────────────────────────────────────────────────────────────────
 
 int _totpPeriodFromUri(String uri) {
   if (!uri.startsWith('otpauth://')) return 30;
@@ -651,8 +613,7 @@ int _totpPeriodFromUri(String uri) {
 class _OtpFieldRow extends StatefulWidget {
   final String label;
   final String uri;
-  final ProtonifyColors c;
-  const _OtpFieldRow({required this.label, required this.uri, required this.c});
+  const _OtpFieldRow({required this.label, required this.uri});
 
   @override
   State<_OtpFieldRow> createState() => _OtpFieldRowState();
@@ -661,7 +622,6 @@ class _OtpFieldRow extends StatefulWidget {
 class _OtpFieldRowState extends State<_OtpFieldRow> {
   final PassService _svc = PassService();
   String? _code;
-  bool _copied = false;
   Timer? _ticker;
   late int _period;
   int _remaining = 30;
@@ -705,13 +665,9 @@ class _OtpFieldRowState extends State<_OtpFieldRow> {
     }
   }
 
-  Future<void> _copy() async {
+  void _copy() {
     if (_code == null) return;
-    await Clipboard.setData(ClipboardData(text: _code!));
-    if (!mounted) return;
-    setState(() => _copied = true);
-    await Future.delayed(const Duration(seconds: 2));
-    if (mounted) setState(() => _copied = false);
+    copyToClipboard(context, _code!, label: widget.label, secret: true);
   }
 
   String _formatted(String code) {
@@ -722,73 +678,76 @@ class _OtpFieldRowState extends State<_OtpFieldRow> {
 
   @override
   Widget build(BuildContext context) {
-    final c = widget.c;
+    final c = context.c;
     final progress = _remaining / _period;
-    final ringColor = _remaining <= 5 ? const Color(0xFFFF375F) : c.accent;
+    final ringColor = _remaining <= 5 ? c.danger : c.accent;
 
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: _copy,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: c.surface,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(widget.label,
-                      style: TextStyle(fontSize: 10, color: c.subtle)),
-                  const SizedBox(height: 2),
-                  Text(
-                    _code == null ? '••• •••' : _formatted(_code!),
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontFamily: 'monospace',
-                      fontWeight: FontWeight.w600,
-                      color: c.onSurface,
-                      letterSpacing: 1.5,
+    return HoverBuilder(
+      cursor: SystemMouseCursors.click,
+      builder: (context, hovered) => GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _copy,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 90),
+          color: hovered ? c.surfaceVariant.withValues(alpha: 0.45) : Colors.transparent,
+          padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(widget.label, style: TextStyle(fontSize: 11.5, color: c.subtle)),
+                    const SizedBox(height: 3),
+                    Text(
+                      _code == null ? '••• •••' : _formatted(_code!),
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontFamily: 'Menlo',
+                        fontWeight: FontWeight.w600,
+                        color: _remaining <= 5 ? c.danger : c.onSurface,
+                        letterSpacing: 1.5,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            SizedBox(
-              width: 22,
-              height: 22,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  CircularProgressIndicator(
-                    value: progress,
-                    strokeWidth: 2,
-                    backgroundColor: c.surfaceVariant,
-                    valueColor: AlwaysStoppedAnimation(ringColor),
-                  ),
-                  Text(
-                    '$_remaining',
-                    style: TextStyle(fontSize: 9, color: c.subtle),
-                  ),
-                ],
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    CircularProgressIndicator(
+                      value: progress,
+                      strokeWidth: 2,
+                      backgroundColor: c.surfaceVariant,
+                      valueColor: AlwaysStoppedAnimation(ringColor),
+                    ),
+                    Text('$_remaining', style: TextStyle(fontSize: 9.5, color: c.subtle)),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(width: 6),
-            Icon(
-              _copied ? Icons.check : Icons.copy_outlined,
-              size: 15,
-              color: _copied ? const Color(0xFF34C759) : c.subtle,
-            ),
-          ],
+              const SizedBox(width: 4),
+              AnimatedOpacity(
+                duration: const Duration(milliseconds: 100),
+                opacity: hovered ? 1 : 0.55,
+                child: AppIconButton(
+                  icon: Icons.content_copy_rounded,
+                  tooltip: 'Copy',
+                  size: 15,
+                  onPressed: _copy,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
+
+// ── Folder picker bits ──────────────────────────────────────────────────────
 
 class _FolderChoice {
   final String? folderId;
@@ -796,59 +755,49 @@ class _FolderChoice {
   const _FolderChoice.none() : folderId = null;
 }
 
-class _FolderChoiceTile extends StatefulWidget {
+class _FolderChoiceTile extends StatelessWidget {
   final String label;
   final IconData icon;
   final bool selected;
-  final ProtonifyColors c;
   final VoidCallback onTap;
   const _FolderChoiceTile({
     required this.label,
     required this.icon,
     required this.selected,
-    required this.c,
     required this.onTap,
   });
 
   @override
-  State<_FolderChoiceTile> createState() => _FolderChoiceTileState();
-}
-
-class _FolderChoiceTileState extends State<_FolderChoiceTile> {
-  bool _hovered = false;
-  @override
   Widget build(BuildContext context) {
-    final c = widget.c;
-    return MouseRegion(
+    final c = context.c;
+    return HoverBuilder(
       cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
+      builder: (context, hovered) => GestureDetector(
+        onTap: onTap,
         child: Container(
+          height: 34,
           margin: const EdgeInsets.symmetric(vertical: 1),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
           decoration: BoxDecoration(
-            color: widget.selected
-                ? c.accent.withValues(alpha: 0.18)
-                : _hovered
+            color: selected
+                ? c.accentSoft
+                : hovered
                     ? c.surfaceVariant
                     : Colors.transparent,
             borderRadius: BorderRadius.circular(7),
           ),
           child: Row(children: [
-            Icon(widget.icon, size: 15,
-                color: widget.selected ? c.accent : c.subtle),
+            Icon(icon, size: 16, color: selected ? c.accentText : c.subtle),
             const SizedBox(width: 10),
             Expanded(
-              child: Text(widget.label,
+              child: Text(label,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: widget.selected ? FontWeight.w600 : FontWeight.normal,
-                      color: widget.selected ? c.accent : c.onSurface)),
+                      fontSize: 13,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+                      color: selected ? c.accentText : c.onSurface)),
             ),
-            if (widget.selected)
-              Icon(Icons.check, size: 14, color: c.accent),
+            if (selected) Icon(Icons.check_rounded, size: 16, color: c.accentText),
           ]),
         ),
       ),

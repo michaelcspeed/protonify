@@ -1,25 +1,30 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../app_state.dart';
-import '../generated/window_api.g.dart';
-import '../main.dart';
-import '../pass_service.dart';
-import '../setup_state.dart';
-import '../widgets/vault_sidebar.dart';
-import '../widgets/item_list.dart';
+import '../theme.dart';
+import '../ui_state.dart';
 import '../widgets/item_detail.dart';
+import '../widgets/item_list.dart';
+import '../widgets/settings_dialog.dart';
+import '../widgets/vault_sidebar.dart';
 
-const double _kSidebarMin = 140;
-const double _kSidebarMax = 360;
+// Layout breakpoints (logical px of window width).
+const double _kWideMin = 960; // sidebar can sit inline
+const double _kSplitMin = 620; // list + detail side by side
+
+const double _kSidebarMin = 180;
+const double _kSidebarMax = 320;
 const double _kSidebarDefault = 220;
-const double _kListMin = 200;
-const double _kListMax = 480;
-const double _kListDefault = 280;
+const double _kListMin = 240;
+const double _kListMax = 460;
+const double _kListDefault = 300;
+const double _kDetailMin = 340;
+const double _kOverlaySidebarWidth = 260;
+
 const String _kSidebarPrefKey = 'pane.sidebarWidth';
 const String _kListPrefKey = 'pane.listWidth';
-
-final _windowApi = WindowApi();
 
 class MainScreen extends ConsumerStatefulWidget {
   const MainScreen({super.key});
@@ -32,6 +37,10 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   double _sidebarWidth = _kSidebarDefault;
   double _listWidth = _kListDefault;
   SharedPreferences? _prefs;
+
+  // Current layout, refreshed on every build; used by shortcut handlers.
+  bool _sidebarInlineAvailable = true;
+  bool _single = false;
 
   @override
   void initState() {
@@ -58,371 +67,233 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     _prefs?.setDouble(_kSidebarPrefKey, clamped);
   }
 
-  void _setList(double w) {
-    final clamped = w.clamp(_kListMin, _kListMax);
+  void _setList(double w, double maxAllowed) {
+    final clamped = w.clamp(_kListMin, maxAllowed.clamp(_kListMin, _kListMax));
     setState(() => _listWidth = clamped);
     _prefs?.setDouble(_kListPrefKey, clamped);
   }
 
+  // ── Actions ────────────────────────────────────────────────────────────
+
+  void _showSidebar() {
+    if (_sidebarInlineAvailable) {
+      ref.read(sidebarPinnedProvider.notifier).set(true);
+    } else {
+      ref.read(sidebarOverlayProvider.notifier).state = true;
+    }
+  }
+
+  void _hideSidebar() {
+    if (ref.read(sidebarOverlayProvider)) {
+      ref.read(sidebarOverlayProvider.notifier).state = false;
+    } else {
+      ref.read(sidebarPinnedProvider.notifier).set(false);
+    }
+  }
+
+  void _toggleSidebar() {
+    final visible = ref.read(sidebarOverlayProvider) ||
+        (_sidebarInlineAvailable && ref.read(sidebarPinnedProvider));
+    visible ? _hideSidebar() : _showSidebar();
+  }
+
+  void _back() => ref.read(appStateProvider.notifier).selectItem(null);
+
+  void _focusSearch() {
+    if (_single) _back();
+    ref.read(sidebarOverlayProvider.notifier).state = false;
+    final node = ref.read(searchFocusProvider);
+    // Wait a frame in case the list pane is being (re)built.
+    WidgetsBinding.instance.addPostFrameCallback((_) => node.requestFocus());
+  }
+
+  void _onEscape() {
+    if (ref.read(sidebarOverlayProvider)) {
+      ref.read(sidebarOverlayProvider.notifier).state = false;
+    } else if (_single && ref.read(appStateProvider).selectedItem != null) {
+      _back();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final c = Theme.of(context).extension<ProtonifyColors>()!;
+    final c = context.c;
+    final pinned = ref.watch(sidebarPinnedProvider);
+    final overlayOpen = ref.watch(sidebarOverlayProvider);
+    final hasSelection = ref.watch(appStateProvider.select((s) => s.selectedItem != null));
+
+    // Close the floating sidebar once the user picks a category/folder.
+    ref.listen(
+      appStateProvider.select((s) => (s.selectedCategory, s.selectedFolderId)),
+      (_, _) {
+        if (ref.read(sidebarOverlayProvider)) {
+          ref.read(sidebarOverlayProvider.notifier).state = false;
+        }
+      },
+    );
+
     return Scaffold(
-      body: Column(
-        children: [
-          const _TopSearchBar(),
-          Expanded(
-            child: Row(
+      backgroundColor: c.background,
+      body: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.keyF, meta: true): _focusSearch,
+          const SingleActivator(LogicalKeyboardKey.keyN, meta: true): () => openNewItem(context, ref),
+          const SingleActivator(LogicalKeyboardKey.keyR, meta: true): () =>
+              ref.read(appStateProvider.notifier).loadVaults(),
+          const SingleActivator(LogicalKeyboardKey.comma, meta: true): () => showSettings(context),
+          const SingleActivator(LogicalKeyboardKey.keyS, meta: true, control: true): _toggleSidebar,
+          const SingleActivator(LogicalKeyboardKey.arrowDown): () => moveSelection(ref, 1),
+          const SingleActivator(LogicalKeyboardKey.arrowUp): () => moveSelection(ref, -1),
+          const SingleActivator(LogicalKeyboardKey.escape): _onEscape,
+          const SingleActivator(LogicalKeyboardKey.keyC, meta: true, shift: true): () =>
+              copySelectedPassword(context, ref),
+        },
+        child: Focus(
+          autofocus: true,
+          child: LayoutBuilder(builder: (context, box) {
+            final w = box.maxWidth;
+            _sidebarInlineAvailable = w >= _kWideMin;
+            _single = w < _kSplitMin;
+            final sidebarInline = _sidebarInlineAvailable && pinned;
+
+            final Widget content;
+            if (_single) {
+              // One pane at a time: list, or the selected item.
+              content = hasSelection
+                  ? ItemDetailPane(leadingInset: true, onBack: _back)
+                  : ItemListPane(leadingInset: true, onShowSidebar: _showSidebar);
+            } else {
+              final sidebarW = sidebarInline ? _sidebarWidth : 0.0;
+              final maxList = w - sidebarW - _kDetailMin - 2;
+              final listW = _listWidth.clamp(_kListMin, maxList.clamp(_kListMin, _kListMax));
+              final divider = Container(width: 1, color: c.border);
+              content = Stack(
+                children: [
+                  Positioned.fill(
+                    child: Row(
+                      children: [
+                        if (sidebarInline) ...[
+                          SizedBox(width: sidebarW, child: VaultSidebar(onHide: _hideSidebar)),
+                          divider,
+                        ],
+                        SizedBox(
+                          width: listW,
+                          child: ItemListPane(
+                            leadingInset: !sidebarInline,
+                            onShowSidebar: sidebarInline ? null : _showSidebar,
+                          ),
+                        ),
+                        divider,
+                        const Expanded(child: ItemDetailPane()),
+                      ],
+                    ),
+                  ),
+                  if (sidebarInline)
+                    _ResizeHandle(
+                      x: sidebarW,
+                      onDrag: (dx) => _setSidebar(_sidebarWidth + dx),
+                    ),
+                  _ResizeHandle(
+                    x: sidebarW + (sidebarInline ? 1 : 0) + listW,
+                    onDrag: (dx) => _setList(listW + dx, maxList),
+                  ),
+                ],
+              );
+            }
+
+            return Stack(
               children: [
-                SizedBox(width: _sidebarWidth, child: const VaultSidebar()),
-                _PaneDivider(
-                  c: c,
-                  onDrag: (dx) => _setSidebar(_sidebarWidth + dx),
-                ),
-                SizedBox(width: _listWidth, child: const ItemListPane()),
-                _PaneDivider(
-                  c: c,
-                  onDrag: (dx) => _setList(_listWidth + dx),
-                ),
-                const Expanded(child: ItemDetailPane()),
+                Positioned.fill(child: content),
+                // Floating sidebar for narrow windows / unpinned.
+                if (overlayOpen && !sidebarInline) ...[
+                  Positioned.fill(
+                    child: GestureDetector(
+                      onTap: _hideSidebar,
+                      child: TweenAnimationBuilder<double>(
+                        tween: Tween(begin: 0, end: 1),
+                        duration: const Duration(milliseconds: 160),
+                        builder: (_, t, _) => ColoredBox(
+                          color: Colors.black.withValues(alpha: 0.32 * t),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    bottom: 0,
+                    width: _kOverlaySidebarWidth.clamp(0, w - 48),
+                    child: TweenAnimationBuilder<double>(
+                      tween: Tween(begin: -1, end: 0),
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOutCubic,
+                      builder: (_, t, child) => FractionalTranslation(
+                        translation: Offset(t, 0),
+                        child: child,
+                      ),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.35),
+                              blurRadius: 24,
+                            ),
+                          ],
+                        ),
+                        child: VaultSidebar(onHide: _hideSidebar),
+                      ),
+                    ),
+                  ),
+                ],
               ],
-            ),
-          ),
-        ],
+            );
+          }),
+        ),
       ),
     );
   }
 }
 
-class _PaneDivider extends StatefulWidget {
-  final ProtonifyColors c;
+/// Invisible drag strip centred on a pane boundary at [x]; highlights the
+/// boundary while hovered or dragged.
+class _ResizeHandle extends StatefulWidget {
+  final double x;
   final void Function(double dx) onDrag;
-  const _PaneDivider({required this.c, required this.onDrag});
+  const _ResizeHandle({required this.x, required this.onDrag});
 
   @override
-  State<_PaneDivider> createState() => _PaneDividerState();
+  State<_ResizeHandle> createState() => _ResizeHandleState();
 }
 
-class _PaneDividerState extends State<_PaneDivider> {
+class _ResizeHandleState extends State<_ResizeHandle> {
   bool _hovered = false;
   bool _dragging = false;
 
   @override
   Widget build(BuildContext context) {
+    final c = context.c;
     final active = _hovered || _dragging;
-    return MouseRegion(
-      cursor: SystemMouseCursors.resizeColumn,
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onHorizontalDragStart: (_) => setState(() => _dragging = true),
-        onHorizontalDragEnd: (_) => setState(() => _dragging = false),
-        onHorizontalDragCancel: () => setState(() => _dragging = false),
-        onHorizontalDragUpdate: (d) => widget.onDrag(d.delta.dx),
-        child: SizedBox(
-          width: 6,
+    return Positioned(
+      left: widget.x - 4,
+      top: 0,
+      bottom: 0,
+      width: 9,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onHorizontalDragStart: (_) => setState(() => _dragging = true),
+          onHorizontalDragEnd: (_) => setState(() => _dragging = false),
+          onHorizontalDragCancel: () => setState(() => _dragging = false),
+          onHorizontalDragUpdate: (d) => widget.onDrag(d.delta.dx),
           child: Center(
-            child: Container(
-              width: 1,
-              color: active
-                  ? widget.c.accent.withValues(alpha: 0.5)
-                  : widget.c.subtle.withValues(alpha: 0.15),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              width: active ? 2 : 0,
+              color: c.accent.withValues(alpha: active ? 0.6 : 0),
             ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _TopSearchBar extends ConsumerStatefulWidget {
-  const _TopSearchBar();
-
-  @override
-  ConsumerState<_TopSearchBar> createState() => _TopSearchBarState();
-}
-
-class _TopSearchBarState extends ConsumerState<_TopSearchBar> {
-  final TextEditingController _controller = TextEditingController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c = Theme.of(context).extension<ProtonifyColors>()!;
-    ref.listen<String>(
-      appStateProvider.select((s) => s.searchQuery),
-      (_, next) {
-        if (_controller.text != next) {
-          _controller.value = TextEditingValue(
-            text: next,
-            selection: TextSelection.collapsed(offset: next.length),
-          );
-        }
-      },
-    );
-    return GestureDetector(
-      onPanStart: (_) => _windowApi.startDrag(),
-      child: Container(
-      color: c.surface,
-      padding: const EdgeInsets.fromLTRB(80, 8, 12, 8),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _controller,
-              onChanged: ref.read(appStateProvider.notifier).setSearch,
-              style: TextStyle(fontSize: 13, color: c.onSurface),
-              decoration: InputDecoration(
-                hintText: 'Search',
-                hintStyle: TextStyle(color: c.subtle, fontSize: 13),
-                prefixIcon: Icon(Icons.search, size: 16, color: c.subtle),
-                filled: true,
-                fillColor: c.surfaceVariant,
-                contentPadding:
-                    const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide.none,
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide(color: c.accent.withValues(alpha: 0.6), width: 1),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          _SettingsButton(c: c),
-        ],
-      ),
-    ));
-  }
-}
-
-class _SettingsButton extends StatelessWidget {
-  final ProtonifyColors c;
-  const _SettingsButton({required this.c});
-
-  @override
-  Widget build(BuildContext context) {
-    return IconButton(
-      icon: Icon(Icons.settings_outlined, size: 17, color: c.subtle),
-      tooltip: 'Settings',
-      onPressed: () => showDialog(
-        context: context,
-        builder: (_) => _SettingsDialog(c: c),
-      ),
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-    );
-  }
-}
-
-class _SettingsDialog extends ConsumerStatefulWidget {
-  final ProtonifyColors c;
-  const _SettingsDialog({required this.c});
-
-  @override
-  ConsumerState<_SettingsDialog> createState() => _SettingsDialogState();
-}
-
-class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
-  bool _menuBarMode = false;
-  bool _loading = true;
-  bool? _sessionHasLock;
-  bool _locking = false;
-  final _svc = PassService();
-
-  @override
-  void initState() {
-    super.initState();
-    _loadSetting();
-    _loadLockStatus();
-  }
-
-  Future<void> _loadSetting() async {
-    try {
-      final enabled = await _windowApi.getMenuBarMode();
-      if (mounted) setState(() { _menuBarMode = enabled; _loading = false; });
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _loadLockStatus() async {
-    final info = await _svc.getSessionInfo();
-    if (mounted) setState(() => _sessionHasLock = info?.hasLock);
-  }
-
-  Future<void> _lockNow() async {
-    setState(() => _locking = true);
-    try {
-      await _svc.lockSession();
-      if (mounted) {
-        Navigator.of(context).pop();
-        ref.read(setupProvider.notifier).check();
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _locking = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
-        );
-      }
-    }
-  }
-
-  Future<void> _toggle(bool value) async {
-    setState(() => _menuBarMode = value);
-    try {
-      await _windowApi.setMenuBarMode(value);
-    } catch (_) {
-      if (mounted) setState(() => _menuBarMode = !value);
-    }
-  }
-
-  Widget _buildLockRow(ProtonifyColors c) {
-    final has = _sessionHasLock;
-    return Row(
-      children: [
-        Icon(Icons.lock_outline, size: 18, color: c.subtle),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Session lock',
-                  style: TextStyle(fontSize: 13, color: c.onSurface)),
-              Text(
-                has == null
-                    ? 'Checking…'
-                    : has
-                        ? 'Lock code is set — tap Lock now to require it.'
-                        : 'No lock set. Run `pass-cli session create-lock` to set one.',
-                style: TextStyle(fontSize: 11, color: c.subtle),
-              ),
-            ],
-          ),
-        ),
-        if (has == true)
-          FilledButton(
-            onPressed: _locking ? null : _lockNow,
-            style: FilledButton.styleFrom(
-              backgroundColor: c.accent,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              minimumSize: Size.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            child: Text(_locking ? 'Locking…' : 'Lock now',
-                style: const TextStyle(fontSize: 12)),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildAppearanceRow(ProtonifyColors c) {
-    final mode = ref.watch(themeModeProvider);
-    final isDark = mode == ThemeMode.dark;
-    return Row(
-      children: [
-        Icon(isDark ? Icons.dark_mode_outlined : Icons.light_mode_outlined, size: 18, color: c.subtle),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Dark mode',
-                  style: TextStyle(fontSize: 13, color: c.onSurface)),
-              Text('Switch between light and dark theme',
-                  style: TextStyle(fontSize: 11, color: c.subtle)),
-            ],
-          ),
-        ),
-        Switch.adaptive(
-          value: isDark,
-          onChanged: (value) {
-            ref.read(themeModeProvider.notifier).state =
-                value ? ThemeMode.dark : ThemeMode.light;
-          },
-          activeTrackColor: c.accent,
-        ),
-      ],
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c = widget.c;
-
-    return Dialog(
-      backgroundColor: c.surface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: SizedBox(
-        width: 340,
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Settings',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: c.onSurface)),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Icon(Icons.dock_outlined, size: 18, color: c.subtle),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Menu bar mode',
-                            style: TextStyle(fontSize: 13, color: c.onSurface)),
-                        Text('Show in menu bar instead of Dock',
-                            style: TextStyle(fontSize: 11, color: c.subtle)),
-                      ],
-                    ),
-                  ),
-                  if (_loading)
-                    SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: c.accent))
-                  else
-                    Switch.adaptive(
-                      value: _menuBarMode,
-                      onChanged: _toggle,
-                      activeTrackColor: c.accent,
-                    ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Divider(height: 1, color: c.subtle.withValues(alpha: 0.15)),
-              const SizedBox(height: 12),
-              _buildAppearanceRow(c),
-              const SizedBox(height: 12),
-              Divider(height: 1, color: c.subtle.withValues(alpha: 0.15)),
-              const SizedBox(height: 12),
-              _buildLockRow(c),
-              const SizedBox(height: 16),
-              Align(
-                alignment: Alignment.centerRight,
-                child: GestureDetector(
-                  onTap: () => Navigator.of(context).pop(),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: c.subtle.withValues(alpha: 0.3)),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text('Done', style: TextStyle(fontSize: 13, color: c.onSurface)),
-                  ),
-                ),
-              ),
-            ],
           ),
         ),
       ),
