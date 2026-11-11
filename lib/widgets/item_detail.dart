@@ -429,9 +429,38 @@ class _ItemDetail extends ConsumerWidget {
     return out;
   }
 
-  Widget _extra(ExtraField f) => f.type == ExtraFieldType.totp
-      ? _OtpFieldRow(label: f.name, uri: f.value)
-      : _FieldRow(label: f.name, value: f.value, secret: f.type == ExtraFieldType.hidden);
+  Widget _extra(ExtraField f) {
+    if (f.type == ExtraFieldType.totp) return _OtpFieldRow(label: f.name, uri: f.value);
+    final date = f.type == ExtraFieldType.text ? _timestampField(f.name, f.value) : null;
+    return _FieldRow(
+      label: f.name,
+      value: f.value,
+      secret: f.type == ExtraFieldType.hidden,
+      display: date == null ? null : '${_DateLabel.relative(date)}  ·  ${_DateLabel.short(date)}',
+    );
+  }
+
+  /// Imported items often carry dates as Unix timestamps in custom fields
+  /// ("Date Created: 1542646744333.164"). Only convert when the name says it's
+  /// a date and the number is a plausible time (1990–2100), in seconds or ms.
+  static DateTime? _timestampField(String name, String value) {
+    if (!RegExp(r'date|time|created|updated|modified|expir', caseSensitive: false).hasMatch(name)) {
+      return null;
+    }
+    final n = double.tryParse(value.trim());
+    if (n == null || !RegExp(r'^\d{9,13}(\.\d+)?$').hasMatch(value.trim())) return null;
+    const minS = 631152000.0; // 1990-01-01
+    const maxS = 4102444800.0; // 2100-01-01
+    final double ms;
+    if (n >= minS && n < maxS) {
+      ms = n * 1000;
+    } else if (n >= minS * 1000 && n < maxS * 1000) {
+      ms = n;
+    } else {
+      return null;
+    }
+    return DateTime.fromMillisecondsSinceEpoch(ms.round());
+  }
 
   static String _maskCard(String n) {
     final digits = n.replaceAll(' ', '');
@@ -458,6 +487,8 @@ class _DateLabel extends StatelessWidget {
 
   static const _months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+  static String short(DateTime d) => '${d.day} ${_months[d.month - 1]} ${d.year}';
+
   static String relative(DateTime d, [DateTime? now]) {
     now ??= DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -480,7 +511,7 @@ class _DateLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.c;
     return Tooltip(
-      message: '${date.day} ${_months[date.month - 1]} ${date.year}',
+      message: short(date),
       child: Text('$label ${relative(date)}', style: TextStyle(fontSize: 11.5, color: c.faint)),
     );
   }
@@ -534,6 +565,9 @@ class _FieldRow extends StatefulWidget {
   final bool link;
   final bool copyable;
   final String? masked;
+
+  /// Readable form of [value] (e.g. a formatted date); copying still copies [value].
+  final String? display;
   const _FieldRow({
     required this.label,
     required this.value,
@@ -542,6 +576,7 @@ class _FieldRow extends StatefulWidget {
     this.link = false,
     this.copyable = true,
     this.masked,
+    this.display,
   });
 
   @override
@@ -557,7 +592,9 @@ class _FieldRowState extends State<_FieldRow> {
   Widget build(BuildContext context) {
     final c = context.c;
     final hidden = widget.secret && !_revealed;
-    final shown = hidden ? (widget.masked ?? '•' * widget.value.length.clamp(8, 14)) : widget.value;
+    final shown = hidden
+        ? (widget.masked ?? '•' * widget.value.length.clamp(8, 14))
+        : (widget.display ?? widget.value);
 
     return HoverBuilder(
       cursor: widget.copyable ? SystemMouseCursors.click : MouseCursor.defer,

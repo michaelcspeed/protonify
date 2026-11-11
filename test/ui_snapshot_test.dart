@@ -38,7 +38,7 @@ class _FakeSetup extends SetupStateNotifier {
 }
 
 PassItem _item(String id, String title, Map<String, dynamic> inner,
-        {String share = 's1', String? folder, String note = ''}) =>
+        {String share = 's1', String? folder, String note = '', Map<String, String> extra = const {}}) =>
     PassItem.fromJson({
       'id': id,
       'share_id': share,
@@ -46,7 +46,14 @@ PassItem _item(String id, String title, Map<String, dynamic> inner,
       'folder_id': folder,
       'create_time': '2025-03-14T10:00:00Z',
       'modify_time': '2026-10-02T10:00:00Z',
-      'content': {'title': title, 'note': note, 'content': inner},
+      'content': {
+        'title': title,
+        'note': note,
+        'content': inner,
+        'extra_fields': [
+          for (final e in extra.entries) {'name': e.key, 'content': {'Text': e.value}}
+        ],
+      },
     });
 
 Map<String, dynamic> _login(String email, String url, [String pw = 'hunter2-Correct-Horse']) =>
@@ -86,6 +93,13 @@ final _items = [
   _item('10', 'Very long title for an item that keeps going and going', _login(
       'an.extremely.long.email.address@subdomain.example.com', 'https://example.com/a/very/long/path')),
   _item('11', 'Alias for newsletters', {'Alias': {}}),
+  _item('13', 'Parse', _login('dev@example.com', 'https://parse.com'), extra: {
+    'Date Updated': '1542646747658.666',
+    'Date Created': '1542646744333.164',
+    'Type': 'LoginItem',
+    'Phone': '4155550123',
+    'Trash': '0',
+  }),
   _item('12', 'Passport', {
     'Identity': {'full_name': 'Mike Speed', 'email': 'mike@example.com', 'passport_number': 'X1234567'}
   }),
@@ -240,6 +254,12 @@ void main() {
     await pumpApp(tester, const Size(1100, 760), ThemeMode.dark,
         selected: _items.firstWhere((i) => i.id == '5'));
     await shot(tester, 'x-dark-card-detail');
+  });
+
+  testWidgets('x-custom-fields', (tester) async {
+    await pumpApp(tester, const Size(1100, 860), ThemeMode.light,
+        selected: _items.firstWhere((i) => i.id == '13'));
+    await shot(tester, 'x-light-custom-fields');
   });
 
   testWidgets('x-tiny', (tester) async {
