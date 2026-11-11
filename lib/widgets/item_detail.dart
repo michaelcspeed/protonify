@@ -318,9 +318,13 @@ class _ItemDetail extends ConsumerWidget {
                   const SizedBox(height: 24),
                   ..._sections(context),
                   const SizedBox(height: 8),
-                  Text(
-                    'Created ${_formatDate(item.createTime)}  ·  Modified ${_formatDate(item.modifyTime)}',
-                    style: TextStyle(fontSize: 11.5, color: c.faint),
+                  Wrap(
+                    spacing: 6,
+                    children: [
+                      _DateLabel('Modified', item.modifyTime),
+                      Text('·', style: TextStyle(fontSize: 11.5, color: c.faint)),
+                      _DateLabel('Created', item.createTime),
+                    ],
                   ),
                 ],
               ),
@@ -444,8 +448,42 @@ class _ItemDetail extends ConsumerWidget {
         _ => s.toUpperCase(),
       };
 
-  static String _formatDate(DateTime d) =>
-      '${d.day} ${const ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.month]} ${d.year}';
+}
+
+/// "Modified 3 days ago", with the exact date on hover.
+class _DateLabel extends StatelessWidget {
+  final String label;
+  final DateTime date;
+  const _DateLabel(this.label, this.date);
+
+  static const _months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  static String relative(DateTime d, [DateTime? now]) {
+    now ??= DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(d.year, d.month, d.day);
+    final days = today.difference(day).inDays;
+    if (days <= 0) return 'today';
+    if (days == 1) return 'yesterday';
+    if (days < 7) return '$days days ago';
+    if (days < 30) {
+      final w = days ~/ 7;
+      return w == 1 ? 'a week ago' : '$w weeks ago';
+    }
+    final months = (now.year - d.year) * 12 + now.month - d.month - (now.day < d.day ? 1 : 0);
+    if (months < 12) return months <= 1 ? 'a month ago' : '$months months ago';
+    final years = months ~/ 12;
+    return years == 1 ? 'a year ago' : '$years years ago';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    return Tooltip(
+      message: '${date.day} ${_months[date.month - 1]} ${date.year}',
+      child: Text('$label ${relative(date)}', style: TextStyle(fontSize: 11.5, color: c.faint)),
+    );
+  }
 }
 
 /// A titled card of rows separated by hairlines.
